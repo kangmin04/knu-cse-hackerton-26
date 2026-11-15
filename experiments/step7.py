@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "experiments/out"
+OUT.mkdir(exist_ok=True)                 # 결과 폴더가 없으면 만든다
 
 data = json.loads((OUT / "6_gemini.json").read_text(encoding="utf-8"))
 

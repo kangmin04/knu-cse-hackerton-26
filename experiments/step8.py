@@ -12,6 +12,7 @@ from step6 import MODEL, PROMPT, ExtractedHandwriting, load_api_key
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "experiments/out"
+OUT.mkdir(exist_ok=True)                 # 결과 폴더가 없으면 만든다
 SOURCE = ROOT / "samples/screen2.jpg"
 CROP = (560, 1370, 80, 1070)          # 화면 부분 (위, 아래, 왼쪽, 오른쪽)
 

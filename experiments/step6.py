@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "experiments/out"
+OUT.mkdir(exist_ok=True)                 # 결과 폴더가 없으면 만든다
 
 IMAGE = ROOT / "samples/screen1.jpg"     # 읽을 사진. 필기만 뽑은 결과로 해 보려면 OUT / "5_preview.png"
 MODEL = "gemini-3.8-flash"
