@@ -10,6 +10,4 @@ __pycache__/
 dist/
 build/
 
-# 실험 결과물
-experiments/out/
 .token-optimizer/

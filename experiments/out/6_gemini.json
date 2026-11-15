@@ -1,0 +1,12 @@
+{
+  "blocks": [
+    {
+      "category": "슬라이드 하단 필기",
+      "lines": [
+        "$\\sum_i x \\cdot p_i \\Rightarrow \\sum_i (a x_i + b) p_i$",
+        "$\\int x \\cdot f(x)$",
+        "$aX + b$"
+      ]
+    }
+  ]
+}
