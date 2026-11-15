@@ -9,3 +9,7 @@ __pycache__/
 .vscode/
 dist/
 build/
+
+# 실험 결과물
+experiments/out/
+.token-optimizer/
