@@ -1,0 +1,365 @@
+"""수업 사진 한 장에서 필기를 덩어리별 스티커 카드로 뽑아낸다.
+
+순서
+  1. OpenCV: 사진에서 프로젝터 화면을 찾아 반듯하게 잘라낸다 (칠판은 크기만 줄임)
+  2. OpenCV: 펜 종류에 맞게 필기만 남긴 마스크를 만든다
+  3. Gemini: 필기를 의미 단위 덩어리로 나누고, 덩어리마다 위치·제목·글자(LaTeX)를 받는다
+  4. OpenCV: Gemini가 준 대략적인 상자를 필기 경계에 맞게 다듬는다
+  5. 덩어리마다 원본 조각, 투명 배경 필기 이미지, 결과 json, 확인용 html을 저장한다
+
+실행
+  python3 pipeline/note_pipeline.py samples/screen2.jpg --pen black
+  python3 pipeline/note_pipeline.py samples/screen1.jpg --pen red
+  python3 pipeline/note_pipeline.py samples/board1.jpg --pen board
+
+필요한 것
+  pip install -r pipeline/requirements.txt
+  저장소 최상위 .env 파일에 GEMINI_API_KEY=발급받은키
+"""
+import argparse
+import html
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+from google import genai
+from google.genai import types
+from PIL import Image
+from pydantic import BaseModel, Field
+
+ROOT = Path(__file__).resolve().parent.parent
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+
+
+# ─────────────────────────────────────────────
+# 1. 화면 찾아 잘라내기
+# ─────────────────────────────────────────────
+
+def order_corners(pts):
+    """네 점을 좌상, 우상, 우하, 좌하 순서로 정렬한다."""
+    pts = pts.reshape(4, 2).astype(np.float32)
+    s = pts.sum(axis=1)
+    d = np.diff(pts, axis=1).ravel()
+    return np.float32([pts[s.argmin()], pts[d.argmin()], pts[s.argmax()], pts[d.argmax()]])
+
+
+def looks_like_screen(quad, img_area):
+    """화면다운 사각형인지: 충분히 크고, 가로가 더 길고, 많이 기울지 않음."""
+    tl, tr, br, bl = quad
+    width = (np.linalg.norm(tr - tl) + np.linalg.norm(br - bl)) / 2
+    height = (np.linalg.norm(bl - tl) + np.linalg.norm(br - tr)) / 2
+    top_angle = abs(np.degrees(np.arctan2(tr[1] - tl[1], tr[0] - tl[0])))
+    return (cv2.contourArea(quad) > 0.15 * img_area
+            and 1.0 < width / max(height, 1) < 2.4
+            and top_angle < 20)
+
+
+def find_screen(img):
+    """밝은 큰 사각형(화면)의 네 모서리를 찾는다. 못 찾으면 None."""
+    scale = 800 / max(img.shape[:2])
+    small = cv2.resize(img, None, fx=scale, fy=scale)
+    gray = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+    img_area = gray.shape[0] * gray.shape[1]
+
+    otsu, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    top = np.percentile(gray, 97)
+    best, best_fill = None, 0
+    for t in np.linspace(otsu, (otsu + top) / 2, 4):          # 밝기 기준을 바꿔 가며 시도
+        bright = (gray > t).astype(np.uint8) * 255
+        bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+        bright = cv2.morphologyEx(bright, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
+        contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        c = max(contours, key=cv2.contourArea)
+        hull = cv2.convexHull(c)
+        quad = cv2.approxPolyDP(hull, 0.02 * cv2.arcLength(hull, True), True)
+        if len(quad) != 4:
+            continue
+        quad = order_corners(np.array(quad, np.float32))
+        if not looks_like_screen(quad, img_area):
+            continue
+        fill = cv2.contourArea(c) / cv2.contourArea(quad)     # 사각형을 얼마나 꽉 채우는가
+        if fill > best_fill:
+            best, best_fill = quad, fill
+    return None if best is None else best / scale
+
+
+def crop_slide(img, pen, max_side=1600):
+    """화면을 찾아 펴서 돌려준다. 칠판이거나 못 찾으면 크기만 줄여서 돌려준다."""
+    corners = find_screen(img) if pen != "board" else None
+    out = img
+    if corners is not None:
+        tl, tr, br, bl = corners
+        w = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
+        h = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
+        dst = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+        out = cv2.warpPerspective(img, cv2.getPerspectiveTransform(corners, dst), (w, h))
+    k = max_side / max(out.shape[:2])
+    if k < 1:
+        out = cv2.resize(out, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    return out, corners
+
+
+# ─────────────────────────────────────────────
+# 2. 필기 마스크
+# ─────────────────────────────────────────────
+
+def ink_mask(img, pen):
+    """필기 부분만 255인 마스크. 펜마다 '주변 배경과 얼마나 다른가'를 다르게 본다."""
+    b, g, r = [c.astype(np.int16) for c in cv2.split(img)]
+    if pen == "red":                                   # 주변보다 붉은 것 (빨강 - 초록)
+        rg = np.clip(r - g + 128, 0, 255).astype(np.uint8)
+        diff = rg.astype(np.int16) - cv2.medianBlur(rg, 51).astype(np.int16)
+        weak, strong = diff > 6, diff > 14
+    else:
+        gray = cv2.bilateralFilter(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), 7, 30, 5)
+        bg = cv2.medianBlur(gray, 51).astype(np.int16)
+        diff = gray.astype(np.int16) - bg if pen == "board" else bg - gray.astype(np.int16)
+        weak, strong = diff > 18, diff > 40            # 칠판은 밝은 것, 검은 펜은 어두운 것
+
+    # 약한 선이라도 진한 선과 이어져 있으면 살린다
+    count, labels = cv2.connectedComponents(weak.astype(np.uint8), connectivity=8)
+    keep = np.zeros(count, bool)
+    keep[np.unique(labels[strong])] = True
+    keep[0] = False
+    return keep[labels].astype(np.uint8) * 255
+
+
+def remove_long_lines(mask):
+    """표 테두리처럼 길게 뻗은 직선을 지운다 (상자를 다듬을 때 멀리 끌려가지 않게)."""
+    h, w = mask.shape
+    horizontal = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, max(1, w // 4)), np.uint8))
+    vertical = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((max(1, h // 4), 1), np.uint8))
+    lines = cv2.dilate(horizontal | vertical, np.ones((5, 5), np.uint8))
+    return cv2.bitwise_and(mask, cv2.bitwise_not(lines))
+
+
+# ─────────────────────────────────────────────
+# 3. Gemini로 덩어리 나누기 + 글자 읽기
+# ─────────────────────────────────────────────
+
+class NoteRegion(BaseModel):
+    box_2d: list[int] = Field(description="덩어리를 감싸는 상자 [ymin, xmin, ymax, xmax]. 이미지를 0~1000으로 본 좌표")
+    title: str = Field(description="이 덩어리가 무엇인지 짧게 (예: f'(x) 부호 확인, 로피탈 계산)")
+    lines: list[str] = Field(description="덩어리 안의 손글씨를 쓰인 순서대로 한 줄씩. 수식 부분만 $...$ 로 감싼 LaTeX")
+
+
+class NoteRegions(BaseModel):
+    regions: list[NoteRegion]
+
+
+PROMPT = """
+이 이미지는 강의 화면(또는 칠판) 사진이야. 손으로 쓴 필기를 '의미 단위 덩어리'로 나눠 줘.
+
+[규칙]
+1. 한 덩어리 = 한 가지 내용 (하나의 풀이 과정, 하나의 메모, 하나의 강조 표시 묶음).
+   같은 풀이의 여러 줄은 한 덩어리로 묶고, 서로 다른 내용은 나눠.
+   →, = 로 시작하는 줄은 바로 위 줄과 같은 풀이이므로 반드시 같은 덩어리에 넣어.
+2. 프로젝터 화면이라면 슬라이드에 원래 인쇄된 글자와 수식은 덩어리에 넣지 마.
+   인쇄된 글자 위에 친 동그라미·밑줄만 있는 곳은 덩어리로 만들지 마.
+3. box_2d는 그 덩어리의 손글씨를 빠짐없이 감싸되 최대한 꼭 맞게.
+4. lines에는 쓰여 있는 내용만 옮겨. 해설을 덧붙이지 말고, 읽을 수 없으면 [?].
+5. 덩어리는 위에서 아래, 왼쪽에서 오른쪽 순서로.
+"""
+
+
+def load_api_key():
+    """저장소 최상위 .env 파일에서 GEMINI_API_KEY를 읽는다."""
+    env_file = ROOT / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            if line.startswith("GEMINI_API_KEY="):
+                os.environ["GEMINI_API_KEY"] = line.split("=", 1)[1].strip().strip('"')
+    if not os.environ.get("GEMINI_API_KEY"):
+        sys.exit(f"API 키가 없어요. {env_file} 에 GEMINI_API_KEY=발급받은키 한 줄을 넣어 주세요.")
+
+
+def ask_regions(img, tries=4):
+    """Gemini에 덩어리를 물어본다. 서버가 바쁘거나 답이 끊겨 오면 다시 시도한다."""
+    client = genai.Client(http_options=types.HttpOptions(timeout=40_000))
+    image = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json", response_schema=NoteRegions, temperature=0.1)
+    for attempt in range(tries):
+        start = time.time()
+        try:
+            response = client.models.generate_content(model=MODEL, contents=[image, PROMPT], config=config)
+            result = NoteRegions.model_validate_json(response.text)   # 끊긴 답이면 여기서 오류
+            return result.regions, time.time() - start
+        except Exception as error:
+            text = str(error)
+            if "API key" in text or "404" in text:
+                raise                                   # 키나 모델 이름 문제는 다시 해도 안 됨
+            reason = "답이 중간에 끊김" if "validation error" in text else text[:70]
+            print(f"  Gemini 실패: {reason} ({attempt + 1}/{tries})", flush=True)
+            time.sleep(5 * (attempt + 1))
+    sys.exit(f"Gemini에 {tries}번 요청했지만 실패했어요. 잠시 뒤 다시 실행해 주세요.")
+
+
+# ─────────────────────────────────────────────
+# 4. 상자 다듬기
+# ─────────────────────────────────────────────
+
+def to_pixels(box, w, h):
+    """Gemini의 0~1000 좌표를 픽셀 (x0, y0, x1, y1)로 바꾼다."""
+    ymin, xmin, ymax, xmax = box
+    x0, x1 = sorted((int(xmin / 1000 * w), int(xmax / 1000 * w)))
+    y0, y1 = sorted((int(ymin / 1000 * h), int(ymax / 1000 * h)))
+    return max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+
+
+def refine_box(mask, box, link=0.006, max_grow=0.3, belong=0.4, pad=6):
+    """상자에 걸친 필기 덩어리를 끝까지 포함하도록 넓히고, 빈 테두리는 좁힌다.
+
+    link: 이 거리(사진 가로 대비)보다 가까운 선은 같은 글자로 보고 이어 붙인다
+    max_grow: 한쪽으로 원래 크기의 이 비율까지만 넓힌다
+    belong: 덩어리의 이 비율 이상이 상자 안에 있을 때만 이 상자의 필기로 본다
+    """
+    h, w = mask.shape
+    x0, y0, x1, y1 = box
+    bw, bh = x1 - x0, y1 - y0
+
+    # 출발점: 상자 안 필기에 딱 맞게 좁힌 상자
+    ys, xs = np.nonzero(mask[y0:y1, x0:x1])
+    if len(xs) == 0:
+        return box
+    nx0, ny0, nx1, ny1 = x0 + xs.min(), y0 + ys.min(), x0 + xs.max(), y0 + ys.max()
+
+    # 경계에 걸친 덩어리 중 이 상자의 것은 끝까지 포함
+    k = max(3, int(w * link))
+    linked = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, max(3, k // 2))))
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(linked, connectivity=8)
+    lx0, ly0 = max(0, int(x0 - bw * max_grow)), max(0, int(y0 - bh * max_grow))
+    lx1, ly1 = min(w, int(x1 + bw * max_grow)), min(h, int(y1 + bh * max_grow))
+    for i in np.unique(labels[y0:y1, x0:x1]):
+        if i == 0:
+            continue
+        cx, cy, cw, ch, area = stats[i]
+        if (labels[y0:y1, x0:x1] == i).sum() < belong * area:
+            continue
+        nx0, ny0 = min(nx0, max(cx, lx0)), min(ny0, max(cy, ly0))
+        nx1, ny1 = max(nx1, min(cx + cw, lx1)), max(ny1, min(cy + ch, ly1))
+
+    # 이어 붙이느라 부풀린 만큼 실제 필기 경계로 좁힌다
+    ys, xs = np.nonzero(mask[ny0:ny1, nx0:nx1])
+    if len(xs):
+        nx0, nx1 = nx0 + xs.min(), nx0 + xs.max()
+        ny0, ny1 = ny0 + ys.min(), ny0 + ys.max()
+    return (int(max(0, nx0 - pad)), int(max(0, ny0 - pad)), int(min(w, nx1 + pad)), int(min(h, ny1 + pad)))
+
+
+# ─────────────────────────────────────────────
+# 5. 저장
+# ─────────────────────────────────────────────
+
+PAGE = """<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>{title}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<style>
+body {{ margin: 0; padding: 24px; background: #e8ece8; color: #1f2623; font-family: -apple-system, "Apple SD Gothic Neo", sans-serif; }}
+h1 {{ font-size: 18px; margin: 0 0 4px; }}
+.meta {{ color: #6b746f; font-size: 13px; margin-bottom: 16px; }}
+.top {{ display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }}
+.top img {{ max-width: 520px; width: 100%; border: 1px solid #c9d0cb; }}
+.cards {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }}
+.card {{ background: #fff; border: 2px solid #fff; border-radius: 10px; box-shadow: 0 2px 0 #c9d0cb; padding: 12px; display: grid; gap: 10px; }}
+.card h2 {{ font-size: 14px; margin: 0; }}
+.ink {{ background: repeating-conic-gradient(#f1f3f1 0 25%, #fff 0 50%) 0 0 / 14px 14px; border-radius: 6px; padding: 6px; }}
+.ink img {{ max-width: 100%; display: block; }}
+.line {{ font-size: 15px; line-height: 1.7; }}
+</style></head><body>
+<h1>{title}</h1>
+<div class="meta">{meta}</div>
+<div class="top"><img src="boxes.jpg" alt="덩어리 위치"></div>
+<div class="cards">{cards}</div>
+<script>
+document.querySelectorAll(".line").forEach(el => renderMathInElement(el, {{
+  delimiters: [{{ left: "$", right: "$", display: false }}], throwOnError: false }}));
+</script>
+</body></html>
+"""
+
+
+def save(out_dir, name, img, mask, cards, seconds, corners):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_dir / "cropped.jpg"), img)
+    preview = img.copy()
+    html_cards = []
+    for c in cards:
+        x0, y0, x1, y1 = c["box"]
+        photo = img[y0:y1, x0:x1]
+        ink = np.zeros((y1 - y0, x1 - x0, 4), np.uint8)
+        ink[..., :3] = photo
+        ink[..., 3] = mask[y0:y1, x0:x1]                        # 필기만 보이게
+        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}.jpg"), photo)
+        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}_ink.png"), ink)
+
+        cv2.rectangle(preview, (x0, y0), (x1, y1), (76, 90, 47), 2)
+        cv2.putText(preview, str(c["no"]), (x0 + 3, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (76, 90, 47), 2)
+        lines = "".join(f'<div class="line">{html.escape(t)}</div>' for t in c["lines"])
+        html_cards.append(f'<div class="card"><h2>{c["no"]}. {html.escape(c["title"])}</h2>'
+                          f'<div class="ink"><img src="card_{c["no"]:02d}_ink.png" alt=""></div>{lines}</div>')
+
+    cv2.imwrite(str(out_dir / "boxes.jpg"), preview)
+    result = {"source": name, "model": MODEL, "seconds": round(seconds, 1),
+              "screen_found": corners is not None, "size": [img.shape[1], img.shape[0]], "cards": cards}
+    (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    meta = f"{MODEL} · {seconds:.1f}초 · 카드 {len(cards)}개 · 화면 {'찾음' if corners is not None else '자르지 않음'}"
+    (out_dir / "index.html").write_text(
+        PAGE.format(title=html.escape(name), meta=html.escape(meta), cards="".join(html_cards)), encoding="utf-8")
+
+
+def run(photo_path, pen, out_root):
+    photo_path = Path(photo_path)
+    original = cv2.imread(str(photo_path))
+    if original is None:
+        sys.exit(f"사진을 읽지 못했어요: {photo_path}")
+
+    img, corners = crop_slide(original, pen)
+    print(f"1. 화면 {'찾아서 잘라냄' if corners is not None else '자르지 않음'} → {img.shape[1]}x{img.shape[0]}", flush=True)
+
+    mask = ink_mask(img, pen)
+    print(f"2. 필기 마스크 ({pen})", flush=True)
+
+    regions, seconds = ask_regions(img)
+    print(f"3. Gemini {seconds:.1f}초, 덩어리 {len(regions)}개", flush=True)
+
+    h, w = mask.shape
+    clean = remove_long_lines(mask)
+    cards = []
+    for region in regions:
+        if len(region.box_2d) != 4:
+            continue
+        rough = to_pixels(region.box_2d, w, h)
+        if rough[2] - rough[0] < 10 or rough[3] - rough[1] < 10:
+            continue
+        cards.append({"no": len(cards) + 1, "title": region.title, "lines": region.lines,
+                      "box_gemini": list(rough), "box": list(refine_box(clean, rough))})
+    print(f"4. 상자 다듬기 {len(cards)}개", flush=True)
+
+    out_dir = Path(out_root) / photo_path.stem
+    save(out_dir, photo_path.name, img, mask, cards, seconds, corners)
+    print(f"5. 저장: {out_dir}/index.html", flush=True)
+    return out_dir
+
+
+def main():
+    parser = argparse.ArgumentParser(description="수업 사진에서 필기를 덩어리별 스티커 카드로 뽑아낸다")
+    parser.add_argument("photo", help="사진 경로")
+    parser.add_argument("--pen", choices=["red", "black", "board"], default="black",
+                        help="red: 빨간 펜(프로젝터) / black: 검은 펜(프로젝터) / board: 칠판")
+    parser.add_argument("--out", default=str(ROOT / "pipeline/out"), help="결과 폴더")
+    args = parser.parse_args()
+    load_api_key()
+    run(args.photo, args.pen, args.out)
+
+
+if __name__ == "__main__":
+    main()

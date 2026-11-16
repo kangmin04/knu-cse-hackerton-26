@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>board1.jpg</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<style>
+body { margin: 0; padding: 24px; background: #e8ece8; color: #1f2623; font-family: -apple-system, "Apple SD Gothic Neo", sans-serif; }
+h1 { font-size: 18px; margin: 0 0 4px; }
+.meta { color: #6b746f; font-size: 13px; margin-bottom: 16px; }
+.top { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }
+.top img { max-width: 520px; width: 100%; border: 1px solid #c9d0cb; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+.card { background: #fff; border: 2px solid #fff; border-radius: 10px; box-shadow: 0 2px 0 #c9d0cb; padding: 12px; display: grid; gap: 10px; }
+.card h2 { font-size: 14px; margin: 0; }
+.ink { background: repeating-conic-gradient(#f1f3f1 0 25%, #fff 0 50%) 0 0 / 14px 14px; border-radius: 6px; padding: 6px; }
+.ink img { max-width: 100%; display: block; }
+.line { font-size: 15px; line-height: 1.7; }
+</style></head><body>
+<h1>board1.jpg</h1>
+<div class="meta">gemini-3.5-flash-lite · 3.7초 · 카드 7개 · 화면 자르지 않음</div>
+<div class="top"><img src="boxes.jpg" alt="덩어리 위치"></div>
+<div class="cards"><div class="card"><h2>1. 힘 법칙</h2><div class="ink"><img src="card_01_ink.png" alt=""></div><div class="line">력</div><div class="line">법칙($\vec{F}\propto\frac{1}{r^{2}}\hat{e}_{r}$)</div><div class="line">$\frac{1}{4\pi\varepsilon_{0}}, \frac{\mu_{0}}{4\pi}$</div></div><div class="card"><h2>2. 전기장</h2><div class="ink"><img src="card_02_ink.png" alt=""></div><div class="line">전기장</div></div><div class="card"><h2>3. 전기위치에너지</h2><div class="ink"><img src="card_03_ink.png" alt=""></div><div class="line">전기위치에너지</div><div class="line">$U(\infty)=0$ 의</div><div class="line">힘$\rightarrow$일(동시에</div><div class="line">$W=-\Delta U=$</div></div><div class="card"><h2>4. 자기력</h2><div class="ink"><img src="card_04_ink.png" alt=""></div><div class="line">자기력</div><div class="line">$\vec{F}_{B}=q\vec{v}\times\vec{B}$</div><div class="line">$=i\vec{L}\times\vec{B}$</div><div class="line">&quot;오른손법칙&quot;</div></div><div class="card"><h2>5. 전기장 관련 요약</h2><div class="ink"><img src="card_05_ink.png" alt=""></div><div class="line">점전하, 전기 dipole, 전기쌍극자 $+ \sum$</div><div class="line">직선도선, 원형도선, 원판 $\rightarrow S \begin{cases} \text{선전하밀도 } \lambda \\ \text{면 &quot; } \sigma \\ \text{부피 &quot; } \rho \end{cases}$</div></div><div class="card"><h2>6. 응용 주제</h2><div class="ink"><img src="card_06_ink.png" alt=""></div><div class="line">J.S. Thomson</div><div class="line">Hall effect</div><div class="line">Uniformly circular motion in $\vec{B}$</div></div><div class="card"><h2>7. 자기장 (Biot-Savart)</h2><div class="ink"><img src="card_07_ink.png" alt=""></div><div class="line">자기장</div><div class="line">$d\vec{B}=\frac{\mu_{0}}{4\pi}\frac{i d\vec{s}\times\hat{r}}{r^{2}}$ (Biot-Savart)</div><div class="line">원형, 무한직선도선</div></div></div>
+<script>
+document.querySelectorAll(".line").forEach(el => renderMathInElement(el, {
+  delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false }));
+</script>
+</body></html>
