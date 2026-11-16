@@ -16,6 +16,7 @@
   pip install -r pipeline/requirements.txt
   저장소 최상위 .env 파일에 GEMINI_API_KEY=발급받은키
 """
+
 import argparse
 import html
 import json
@@ -39,6 +40,7 @@ MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 # 1. 화면 찾아 잘라내기
 # ─────────────────────────────────────────────
 
+
 def order_corners(pts):
     """네 점을 좌상, 우상, 우하, 좌하 순서로 정렬한다."""
     pts = pts.reshape(4, 2).astype(np.float32)
@@ -53,9 +55,11 @@ def looks_like_screen(quad, img_area):
     width = (np.linalg.norm(tr - tl) + np.linalg.norm(br - bl)) / 2
     height = (np.linalg.norm(bl - tl) + np.linalg.norm(br - tr)) / 2
     top_angle = abs(np.degrees(np.arctan2(tr[1] - tl[1], tr[0] - tl[0])))
-    return (cv2.contourArea(quad) > 0.15 * img_area
-            and 1.0 < width / max(height, 1) < 2.4
-            and top_angle < 20)
+    return (
+        cv2.contourArea(quad) > 0.15 * img_area
+        and 1.0 < width / max(height, 1) < 2.4
+        and top_angle < 20
+    )
 
 
 def find_screen(img):
@@ -68,7 +72,7 @@ def find_screen(img):
     otsu, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     top = np.percentile(gray, 97)
     best, best_fill = None, 0
-    for t in np.linspace(otsu, (otsu + top) / 2, 4):          # 밝기 기준을 바꿔 가며 시도
+    for t in np.linspace(otsu, (otsu + top) / 2, 4):  # 밝기 기준을 바꿔 가며 시도
         bright = (gray > t).astype(np.uint8) * 255
         bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
         bright = cv2.morphologyEx(bright, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
@@ -83,7 +87,7 @@ def find_screen(img):
         quad = order_corners(np.array(quad, np.float32))
         if not looks_like_screen(quad, img_area):
             continue
-        fill = cv2.contourArea(c) / cv2.contourArea(quad)     # 사각형을 얼마나 꽉 채우는가
+        fill = cv2.contourArea(c) / cv2.contourArea(quad)  # 사각형을 얼마나 꽉 채우는가
         if fill > best_fill:
             best, best_fill = quad, fill
     return None if best is None else best / scale
@@ -109,10 +113,11 @@ def crop_slide(img, pen, max_side=1600):
 # 2. 필기 마스크
 # ─────────────────────────────────────────────
 
+
 def ink_mask(img, pen):
     """필기 부분만 255인 마스크. 펜마다 '주변 배경과 얼마나 다른가'를 다르게 본다."""
     b, g, r = [c.astype(np.int16) for c in cv2.split(img)]
-    if pen == "red":                                   # 주변보다 붉은 것 (빨강 - 초록)
+    if pen == "red":  # 주변보다 붉은 것 (빨강 - 초록)
         rg = np.clip(r - g + 128, 0, 255).astype(np.uint8)
         diff = rg.astype(np.int16) - cv2.medianBlur(rg, 51).astype(np.int16)
         weak, strong = diff > 6, diff > 14
@@ -120,7 +125,7 @@ def ink_mask(img, pen):
         gray = cv2.bilateralFilter(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), 7, 30, 5)
         bg = cv2.medianBlur(gray, 51).astype(np.int16)
         diff = gray.astype(np.int16) - bg if pen == "board" else bg - gray.astype(np.int16)
-        weak, strong = diff > 18, diff > 40            # 칠판은 밝은 것, 검은 펜은 어두운 것
+        weak, strong = diff > 18, diff > 40  # 칠판은 밝은 것, 검은 펜은 어두운 것
 
     # 약한 선이라도 진한 선과 이어져 있으면 살린다
     count, labels = cv2.connectedComponents(weak.astype(np.uint8), connectivity=8)
@@ -143,10 +148,15 @@ def remove_long_lines(mask):
 # 3. Gemini로 덩어리 나누기 + 글자 읽기
 # ─────────────────────────────────────────────
 
+
 class NoteRegion(BaseModel):
-    box_2d: list[int] = Field(description="덩어리를 감싸는 상자 [ymin, xmin, ymax, xmax]. 이미지를 0~1000으로 본 좌표")
+    box_2d: list[int] = Field(
+        description="덩어리를 감싸는 상자 [ymin, xmin, ymax, xmax]. 이미지를 0~1000으로 본 좌표"
+    )
     title: str = Field(description="이 덩어리가 무엇인지 짧게 (예: f'(x) 부호 확인, 로피탈 계산)")
-    lines: list[str] = Field(description="덩어리 안의 손글씨를 쓰인 순서대로 한 줄씩. 수식 부분만 $...$ 로 감싼 LaTeX")
+    lines: list[str] = Field(
+        description="덩어리 안의 손글씨를 쓰인 순서대로 한 줄씩. 수식 부분만 $...$ 로 감싼 LaTeX"
+    )
 
 
 class NoteRegions(BaseModel):
@@ -184,17 +194,20 @@ def ask_regions(img, tries=4):
     client = genai.Client(http_options=types.HttpOptions(timeout=40_000))
     image = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     config = types.GenerateContentConfig(
-        response_mime_type="application/json", response_schema=NoteRegions, temperature=0.1)
+        response_mime_type="application/json", response_schema=NoteRegions, temperature=0.1
+    )
     for attempt in range(tries):
         start = time.time()
         try:
-            response = client.models.generate_content(model=MODEL, contents=[image, PROMPT], config=config)
-            result = NoteRegions.model_validate_json(response.text)   # 끊긴 답이면 여기서 오류
+            response = client.models.generate_content(
+                model=MODEL, contents=[image, PROMPT], config=config
+            )
+            result = NoteRegions.model_validate_json(response.text)  # 끊긴 답이면 여기서 오류
             return result.regions, time.time() - start
         except Exception as error:
             text = str(error)
             if "API key" in text or "404" in text:
-                raise                                   # 키나 모델 이름 문제는 다시 해도 안 됨
+                raise  # 키나 모델 이름 문제는 다시 해도 안 됨
             reason = "답이 중간에 끊김" if "validation error" in text else text[:70]
             print(f"  Gemini 실패: {reason} ({attempt + 1}/{tries})", flush=True)
             time.sleep(5 * (attempt + 1))
@@ -204,6 +217,7 @@ def ask_regions(img, tries=4):
 # ─────────────────────────────────────────────
 # 4. 상자 다듬기
 # ─────────────────────────────────────────────
+
 
 def to_pixels(box, w, h):
     """Gemini의 0~1000 좌표를 픽셀 (x0, y0, x1, y1)로 바꾼다."""
@@ -250,7 +264,12 @@ def refine_box(mask, box, link=0.006, max_grow=0.3, belong=0.4, pad=6):
     if len(xs):
         nx0, nx1 = nx0 + xs.min(), nx0 + xs.max()
         ny0, ny1 = ny0 + ys.min(), ny0 + ys.max()
-    return (int(max(0, nx0 - pad)), int(max(0, ny0 - pad)), int(min(w, nx1 + pad)), int(min(h, ny1 + pad)))
+    return (
+        int(max(0, nx0 - pad)),
+        int(max(0, ny0 - pad)),
+        int(min(w, nx1 + pad)),
+        int(min(h, ny1 + pad)),
+    )
 
 
 # ─────────────────────────────────────────────
@@ -263,15 +282,18 @@ PAGE = """<!doctype html>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 <style>
-body {{ margin: 0; padding: 24px; background: #e8ece8; color: #1f2623; font-family: -apple-system, "Apple SD Gothic Neo", sans-serif; }}
+body {{ margin: 0; padding: 24px; background: #e8ece8; color: #1f2623;
+       font-family: -apple-system, "Apple SD Gothic Neo", sans-serif; }}
 h1 {{ font-size: 18px; margin: 0 0 4px; }}
 .meta {{ color: #6b746f; font-size: 13px; margin-bottom: 16px; }}
 .top {{ display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }}
 .top img {{ max-width: 520px; width: 100%; border: 1px solid #c9d0cb; }}
 .cards {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }}
-.card {{ background: #fff; border: 2px solid #fff; border-radius: 10px; box-shadow: 0 2px 0 #c9d0cb; padding: 12px; display: grid; gap: 10px; }}
+.card {{ background: #fff; border: 2px solid #fff; border-radius: 10px;
+        box-shadow: 0 2px 0 #c9d0cb; padding: 12px; display: grid; gap: 10px; }}
 .card h2 {{ font-size: 14px; margin: 0; }}
-.ink {{ background: repeating-conic-gradient(#f1f3f1 0 25%, #fff 0 50%) 0 0 / 14px 14px; border-radius: 6px; padding: 6px; }}
+.ink {{ background: repeating-conic-gradient(#f1f3f1 0 25%, #fff 0 50%) 0 0 / 14px 14px;
+       border-radius: 6px; padding: 6px; }}
 .ink img {{ max-width: 100%; display: block; }}
 .line {{ font-size: 15px; line-height: 1.7; }}
 </style></head><body>
@@ -297,23 +319,38 @@ def save(out_dir, name, img, mask, cards, seconds, corners):
         photo = img[y0:y1, x0:x1]
         ink = np.zeros((y1 - y0, x1 - x0, 4), np.uint8)
         ink[..., :3] = photo
-        ink[..., 3] = mask[y0:y1, x0:x1]                        # 필기만 보이게
+        ink[..., 3] = mask[y0:y1, x0:x1]  # 필기만 보이게
         cv2.imwrite(str(out_dir / f"card_{c['no']:02d}.jpg"), photo)
         cv2.imwrite(str(out_dir / f"card_{c['no']:02d}_ink.png"), ink)
 
         cv2.rectangle(preview, (x0, y0), (x1, y1), (76, 90, 47), 2)
-        cv2.putText(preview, str(c["no"]), (x0 + 3, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (76, 90, 47), 2)
+        cv2.putText(
+            preview, str(c["no"]), (x0 + 3, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (76, 90, 47), 2
+        )
         lines = "".join(f'<div class="line">{html.escape(t)}</div>' for t in c["lines"])
-        html_cards.append(f'<div class="card"><h2>{c["no"]}. {html.escape(c["title"])}</h2>'
-                          f'<div class="ink"><img src="card_{c["no"]:02d}_ink.png" alt=""></div>{lines}</div>')
+        html_cards.append(
+            f'<div class="card"><h2>{c["no"]}. {html.escape(c["title"])}</h2>'
+            f'<div class="ink"><img src="card_{c["no"]:02d}_ink.png" alt=""></div>{lines}</div>'
+        )
 
     cv2.imwrite(str(out_dir / "boxes.jpg"), preview)
-    result = {"source": name, "model": MODEL, "seconds": round(seconds, 1),
-              "screen_found": corners is not None, "size": [img.shape[1], img.shape[0]], "cards": cards}
-    (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    meta = f"{MODEL} · {seconds:.1f}초 · 카드 {len(cards)}개 · 화면 {'찾음' if corners is not None else '자르지 않음'}"
+    result = {
+        "source": name,
+        "model": MODEL,
+        "seconds": round(seconds, 1),
+        "screen_found": corners is not None,
+        "size": [img.shape[1], img.shape[0]],
+        "cards": cards,
+    }
+    (out_dir / "result.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    found = "찾음" if corners is not None else "자르지 않음"
+    meta = f"{MODEL} · {seconds:.1f}초 · 카드 {len(cards)}개 · 화면 {found}"
     (out_dir / "index.html").write_text(
-        PAGE.format(title=html.escape(name), meta=html.escape(meta), cards="".join(html_cards)), encoding="utf-8")
+        PAGE.format(title=html.escape(name), meta=html.escape(meta), cards="".join(html_cards)),
+        encoding="utf-8",
+    )
 
 
 def run(photo_path, pen, out_root):
@@ -323,7 +360,11 @@ def run(photo_path, pen, out_root):
         sys.exit(f"사진을 읽지 못했어요: {photo_path}")
 
     img, corners = crop_slide(original, pen)
-    print(f"1. 화면 {'찾아서 잘라냄' if corners is not None else '자르지 않음'} → {img.shape[1]}x{img.shape[0]}", flush=True)
+    print(
+        f"1. 화면 {'찾아서 잘라냄' if corners is not None else '자르지 않음'} "
+        f"→ {img.shape[1]}x{img.shape[0]}",
+        flush=True,
+    )
 
     mask = ink_mask(img, pen)
     print(f"2. 필기 마스크 ({pen})", flush=True)
@@ -340,8 +381,15 @@ def run(photo_path, pen, out_root):
         rough = to_pixels(region.box_2d, w, h)
         if rough[2] - rough[0] < 10 or rough[3] - rough[1] < 10:
             continue
-        cards.append({"no": len(cards) + 1, "title": region.title, "lines": region.lines,
-                      "box_gemini": list(rough), "box": list(refine_box(clean, rough))})
+        cards.append(
+            {
+                "no": len(cards) + 1,
+                "title": region.title,
+                "lines": region.lines,
+                "box_gemini": list(rough),
+                "box": list(refine_box(clean, rough)),
+            }
+        )
     print(f"4. 상자 다듬기 {len(cards)}개", flush=True)
 
     out_dir = Path(out_root) / photo_path.stem
@@ -351,10 +399,16 @@ def run(photo_path, pen, out_root):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="수업 사진에서 필기를 덩어리별 스티커 카드로 뽑아낸다")
+    parser = argparse.ArgumentParser(
+        description="수업 사진에서 필기를 덩어리별 스티커 카드로 뽑아낸다"
+    )
     parser.add_argument("photo", help="사진 경로")
-    parser.add_argument("--pen", choices=["red", "black", "board"], default="black",
-                        help="red: 빨간 펜(프로젝터) / black: 검은 펜(프로젝터) / board: 칠판")
+    parser.add_argument(
+        "--pen",
+        choices=["red", "black", "board"],
+        default="black",
+        help="red: 빨간 펜(프로젝터) / black: 검은 펜(프로젝터) / board: 칠판",
+    )
     parser.add_argument("--out", default=str(ROOT / "pipeline/out"), help="결과 폴더")
     args = parser.parse_args()
     load_api_key()
