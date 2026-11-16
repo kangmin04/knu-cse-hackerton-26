@@ -13,3 +13,4 @@ build/
 
 # 파이프라인 실행 결과
 pipeline/out/
+!.env.example
