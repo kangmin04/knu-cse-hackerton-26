@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# 실험 스크립트는 test 브랜치 전용이라 lint 대상에서 제외한다
+extend-exclude = ["experiments", "samples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.format]
+quote-style = "double"
