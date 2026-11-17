@@ -418,6 +418,7 @@ struct SubjectCardsScreen: View {
                     }
                     .buttonStyle(.plain)
                     PrimaryButton(title: "\(selection.count)개 복사", enabled: !selection.isEmpty) {
+                        Clipboard.copy(selectedText)
                         router.push(.splitView)
                     }
                 }
@@ -616,11 +617,15 @@ extension SubjectCardsScreen {
         })
     }
 
+    /// 고른 카드 글자를 한데 이은 것 (카드 사이 빈 줄)
+    var selectedText: String {
+        all.filter { selection.contains($0.id) }.map(\.text).joined(separator: "\n\n")
+    }
+
     /// 고른 카드의 글자를 클립보드에 넣고 알림을 잠깐 띄워요.
     private func copySelection() {
-        let picked = all.filter { selection.contains($0.id) }
-        Clipboard.copy(picked.map(\.text).joined(separator: "\n\n"))
-        withAnimation(.easeOut(duration: 0.5).delay(0.1)) { copiedCount = picked.count }
+        Clipboard.copy(selectedText)
+        withAnimation(.easeOut(duration: 0.5).delay(0.1)) { copiedCount = selection.count }
         Task {
             try? await Task.sleep(for: .seconds(2.2))
             withAnimation(.easeIn(duration: 0.25)) { copiedCount = nil }
