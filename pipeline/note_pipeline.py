@@ -200,6 +200,9 @@ class GeminiError(RuntimeError):
 RPM_LIMIT = 12  # 무료 등급 한도는 분당 15회. 여유를 두고 12회까지만 보낸다 (다시 시도 포함)
 RETRY_WAITS = (3, 6, 12)  # 다시 시도하기 전에 쉬는 초. 최대 3번 다시 시도
 RETRY_CODES = {500, 503, 504}  # 서버 쪽 일시 오류만 다시 시도한다
+# 요청 한 번을 기다리는 최대 초. 라이브러리의 시간 제한은 연결·받기 단계마다 따로 걸려서
+# 요청 전체를 막지 못한다 (실제로 312초 걸린 적 있음). 그래서 전체 시간을 직접 잰다.
+REQUEST_TIMEOUT = 30
 
 _calls = deque()  # 최근 60초 동안 보낸 요청 시각
 _calls_lock = threading.Lock()  # 서버에서 여러 요청이 동시에 들어와도 한도를 지키도록
@@ -212,6 +215,31 @@ def get_client():
     if _client is None:
         _client = genai.Client(http_options=types.HttpOptions(timeout=40_000))
     return _client
+
+
+def generate(contents, config):
+    """Gemini 요청을 한 번 보내고 REQUEST_TIMEOUT초까지만 기다린다. 넘으면 TimeoutError.
+
+    요청은 별도 스레드에서 보내고, 시간이 넘으면 기다리지 않고 버린다 (뒤에서 끝나도 결과는 안 씀).
+    """
+    box = {}
+
+    def work():
+        try:
+            box["response"] = get_client().models.generate_content(
+                model=MODEL, contents=contents, config=config
+            )
+        except Exception as error:  # 오류는 부른 쪽에서 다시 던진다
+            box["error"] = error
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(REQUEST_TIMEOUT)
+    if worker.is_alive():
+        raise TimeoutError(f"{REQUEST_TIMEOUT}초 안에 답이 없음")
+    if "error" in box:
+        raise box["error"]
+    return box["response"]
 
 
 def wait_for_slot():
@@ -259,7 +287,8 @@ def ask_regions(img):
 
     돌려주는 값: (덩어리 목록, 정보). 정보는 seconds(성공한 요청의 응답 시간),
     retries(다시 시도한 횟수), waited(한도·다시 시도로 기다린 초)
-    다시 시도: 서버 일시 오류(500·503·504), 연결 끊김·시간 초과, 답이 끊기거나 깨짐
+    다시 시도: 서버 일시 오류(500·503·504), 연결 끊김, REQUEST_TIMEOUT초 넘게 답이 없음,
+    답이 끊기거나 깨짐
     바로 멈춤: 사용 한도 초과(429), 키·모델 이름 문제처럼 다시 해도 안 되는 오류
     끝내 실패하면 GeminiError를 던진다 (프로그램을 끝내지 않아서 서버에서도 쓸 수 있음).
     """
@@ -272,9 +301,7 @@ def ask_regions(img):
         waited += wait_for_slot()
         start = time.time()
         try:
-            response = get_client().models.generate_content(
-                model=MODEL, contents=[image, PROMPT], config=config
-            )
+            response = generate([image, PROMPT], config)
             regions = parse_regions(response.text)
             info = {"seconds": time.time() - start, "retries": attempt, "waited": waited}
             return regions, info
@@ -286,7 +313,9 @@ def ask_regions(img):
                 raise GeminiError(f"Gemini 요청 실패({error.code}): {error.message}") from error
             reason = f"서버 오류 {error.code}"
         except httpx.TransportError:
-            reason = "연결 끊김·시간 초과"
+            reason = "연결 끊김"
+        except TimeoutError:
+            reason = f"{REQUEST_TIMEOUT}초 안에 답이 없음"
         except ValueError:  # JSON 오류와 형식 검사(pydantic) 오류가 모두 ValueError
             reason = "답이 끊기거나 깨짐"
         if attempt == len(RETRY_WAITS):
