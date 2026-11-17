@@ -189,8 +189,15 @@ def load_api_key():
         sys.exit(f"API 키가 없어요. {env_file} 에 GEMINI_API_KEY=발급받은키 한 줄을 넣어 주세요.")
 
 
+class GeminiError(RuntimeError):
+    """Gemini에 여러 번 요청했지만 끝내 답을 받지 못함."""
+
+
 def ask_regions(img, tries=4):
-    """Gemini에 덩어리를 물어본다. 서버가 바쁘거나 답이 끊겨 오면 다시 시도한다."""
+    """Gemini에 덩어리를 물어본다. 서버가 바쁘거나 답이 끊겨 오면 다시 시도한다.
+
+    끝내 실패하면 GeminiError를 던진다 (프로그램을 끝내지 않아서 서버에서도 쓸 수 있음).
+    """
     client = genai.Client(http_options=types.HttpOptions(timeout=40_000))
     image = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     config = types.GenerateContentConfig(
@@ -211,7 +218,7 @@ def ask_regions(img, tries=4):
             reason = "답이 중간에 끊김" if "validation error" in text else text[:70]
             print(f"  Gemini 실패: {reason} ({attempt + 1}/{tries})", flush=True)
             time.sleep(5 * (attempt + 1))
-    sys.exit(f"Gemini에 {tries}번 요청했지만 실패했어요. 잠시 뒤 다시 실행해 주세요.")
+    raise GeminiError(f"Gemini에 {tries}번 요청했지만 실패했어요. 잠시 뒤 다시 실행해 주세요.")
 
 
 # ─────────────────────────────────────────────
@@ -353,12 +360,12 @@ def save(out_dir, name, img, mask, cards, seconds, corners):
     )
 
 
-def run(photo_path, pen, out_root):
-    photo_path = Path(photo_path)
-    original = cv2.imread(str(photo_path))
-    if original is None:
-        sys.exit(f"사진을 읽지 못했어요: {photo_path}")
+def process(original, pen):
+    """사진(BGR 배열) 한 장을 처리해 결과를 돌려준다. 파일은 만들지 않는다.
 
+    돌려주는 값: img(잘라낸 사진), corners(화면 모서리, 못 찾으면 None), mask(필기 마스크),
+    cards(덩어리 카드 목록), seconds(Gemini 응답 시간)
+    """
     img, corners = crop_slide(original, pen)
     print(
         f"1. 화면 {'찾아서 잘라냄' if corners is not None else '자르지 않음'} "
@@ -391,9 +398,31 @@ def run(photo_path, pen, out_root):
             }
         )
     print(f"4. 상자 다듬기 {len(cards)}개", flush=True)
+    return {"img": img, "corners": corners, "mask": mask, "cards": cards, "seconds": seconds}
+
+
+def run(photo_path, pen, out_root):
+    """사진 파일을 처리해 결과 폴더에 저장한다 (명령줄 실행용)."""
+    photo_path = Path(photo_path)
+    original = cv2.imread(str(photo_path))
+    if original is None:
+        sys.exit(f"사진을 읽지 못했어요: {photo_path}")
+
+    try:
+        result = process(original, pen)
+    except GeminiError as error:
+        sys.exit(str(error))
 
     out_dir = Path(out_root) / photo_path.stem
-    save(out_dir, photo_path.name, img, mask, cards, seconds, corners)
+    save(
+        out_dir,
+        photo_path.name,
+        result["img"],
+        result["mask"],
+        result["cards"],
+        result["seconds"],
+        result["corners"],
+    )
     print(f"5. 저장: {out_dir}/index.html", flush=True)
     return out_dir
 
