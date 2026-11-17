@@ -21,14 +21,18 @@ import argparse
 import html
 import json
 import os
+import re
 import sys
+import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
+import httpx
 import numpy as np
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -190,35 +194,114 @@ def load_api_key():
 
 
 class GeminiError(RuntimeError):
-    """Gemini에 여러 번 요청했지만 끝내 답을 받지 못함."""
+    """Gemini에 요청했지만 끝내 답을 받지 못함."""
 
 
-def ask_regions(img, tries=4):
-    """Gemini에 덩어리를 물어본다. 서버가 바쁘거나 답이 끊겨 오면 다시 시도한다.
+RPM_LIMIT = 12  # 무료 등급 한도는 분당 15회. 여유를 두고 12회까지만 보낸다 (다시 시도 포함)
+RETRY_WAITS = (3, 6, 12)  # 다시 시도하기 전에 쉬는 초. 최대 3번 다시 시도
+RETRY_CODES = {500, 503, 504}  # 서버 쪽 일시 오류만 다시 시도한다
 
+_calls = deque()  # 최근 60초 동안 보낸 요청 시각
+_calls_lock = threading.Lock()  # 서버에서 여러 요청이 동시에 들어와도 한도를 지키도록
+_client = None
+
+
+def get_client():
+    """Gemini 연결을 한 번만 만들어 다시 쓴다."""
+    global _client
+    if _client is None:
+        _client = genai.Client(http_options=types.HttpOptions(timeout=40_000))
+    return _client
+
+
+def wait_for_slot():
+    """최근 60초 동안 보낸 요청이 RPM_LIMIT개면 자리가 날 때까지 기다린다. 기다린 초를 돌려준다."""
+    waited = 0.0
+    while True:
+        with _calls_lock:
+            now = time.time()
+            while _calls and now - _calls[0] > 60:
+                _calls.popleft()
+            if len(_calls) < RPM_LIMIT:
+                _calls.append(now)
+                return waited
+            pause = 60 - (now - _calls[0]) + 0.1
+        print(f"  분당 {RPM_LIMIT}회 도달 → {pause:.0f}초 대기", flush=True)
+        time.sleep(pause)
+        waited += pause
+
+
+def _fix_escape(match):
+    """JSON에서 올바른 이스케이프만 두고, 나머지 역슬래시는 두 개로 바꾼다."""
+    s = match.group(0)
+    valid = (
+        s in ("\\\\", '\\"', "\\/")
+        or re.fullmatch(r"\\u[0-9a-fA-F]{4}", s)
+        or (len(s) == 2 and s[1] in "bfnrt")
+    )
+    return s if valid else "\\" + s
+
+
+def parse_regions(text):
+    """Gemini 답(JSON 글자)을 덩어리 목록으로 바꾼다. 끊기거나 깨진 답이면 ValueError.
+
+    모델이 LaTeX 역슬래시를 하나만 보낼 때가 있다. \\lim 은 JSON 오류가 나고,
+    \\frac·\\times 는 \\f(폼피드)·\\t(탭)으로 바뀌어 수식이 깨지므로 먼저 고친다.
+    """
+    if not text:
+        raise ValueError("빈 답")
+    fixed = re.sub(r'\\(\\|"|/|u[0-9a-fA-F]{4}|[a-zA-Z]+|.)', _fix_escape, text)
+    return NoteRegions.model_validate(json.loads(fixed, strict=False)).regions
+
+
+def ask_regions(img):
+    """Gemini에 덩어리를 물어본다.
+
+    돌려주는 값: (덩어리 목록, 정보). 정보는 seconds(성공한 요청의 응답 시간),
+    retries(다시 시도한 횟수), waited(한도·다시 시도로 기다린 초)
+    다시 시도: 서버 일시 오류(500·503·504), 연결 끊김·시간 초과, 답이 끊기거나 깨짐
+    바로 멈춤: 사용 한도 초과(429), 키·모델 이름 문제처럼 다시 해도 안 되는 오류
     끝내 실패하면 GeminiError를 던진다 (프로그램을 끝내지 않아서 서버에서도 쓸 수 있음).
     """
-    client = genai.Client(http_options=types.HttpOptions(timeout=40_000))
     image = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     config = types.GenerateContentConfig(
         response_mime_type="application/json", response_schema=NoteRegions, temperature=0.1
     )
-    for attempt in range(tries):
+    waited = 0.0
+    for attempt in range(len(RETRY_WAITS) + 1):
+        waited += wait_for_slot()
         start = time.time()
         try:
-            response = client.models.generate_content(
+            response = get_client().models.generate_content(
                 model=MODEL, contents=[image, PROMPT], config=config
             )
-            result = NoteRegions.model_validate_json(response.text)  # 끊긴 답이면 여기서 오류
-            return result.regions, time.time() - start
-        except Exception as error:
-            text = str(error)
-            if "API key" in text or "404" in text:
-                raise  # 키나 모델 이름 문제는 다시 해도 안 됨
-            reason = "답이 중간에 끊김" if "validation error" in text else text[:70]
-            print(f"  Gemini 실패: {reason} ({attempt + 1}/{tries})", flush=True)
-            time.sleep(5 * (attempt + 1))
-    raise GeminiError(f"Gemini에 {tries}번 요청했지만 실패했어요. 잠시 뒤 다시 실행해 주세요.")
+            regions = parse_regions(response.text)
+            info = {"seconds": time.time() - start, "retries": attempt, "waited": waited}
+            return regions, info
+        except errors.APIError as error:
+            if error.code == 429:
+                message = "Gemini 사용 한도를 넘었어요(429). 잠시 뒤 다시 시도해 주세요."
+                raise GeminiError(message) from error
+            if error.code not in RETRY_CODES:
+                raise GeminiError(f"Gemini 요청 실패({error.code}): {error.message}") from error
+            reason = f"서버 오류 {error.code}"
+        except httpx.TransportError:
+            reason = "연결 끊김·시간 초과"
+        except ValueError:  # JSON 오류와 형식 검사(pydantic) 오류가 모두 ValueError
+            reason = "답이 끊기거나 깨짐"
+        if attempt == len(RETRY_WAITS):
+            break
+        pause = RETRY_WAITS[attempt]
+        print(
+            f"  Gemini 실패: {reason} → {pause}초 뒤 다시 시도 ({attempt + 1}/{len(RETRY_WAITS)})",
+            flush=True,
+        )
+        time.sleep(pause)
+        waited += pause
+    raise GeminiError(
+        f"Gemini에 {len(RETRY_WAITS) + 1}번 요청했지만 실패했어요({reason}). "
+        "잠시 뒤 다시 실행해 주세요."
+    )
 
 
 # ─────────────────────────────────────────────
@@ -364,7 +447,8 @@ def process(original, pen):
     """사진(BGR 배열) 한 장을 처리해 결과를 돌려준다. 파일은 만들지 않는다.
 
     돌려주는 값: img(잘라낸 사진), corners(화면 모서리, 못 찾으면 None), mask(필기 마스크),
-    cards(덩어리 카드 목록), seconds(Gemini 응답 시간)
+    cards(덩어리 카드 목록), seconds(Gemini 응답 시간), retries(Gemini 다시 시도 횟수),
+    waited(한도·다시 시도로 기다린 초)
     """
     img, corners = crop_slide(original, pen)
     print(
@@ -376,8 +460,8 @@ def process(original, pen):
     mask = ink_mask(img, pen)
     print(f"2. 필기 마스크 ({pen})", flush=True)
 
-    regions, seconds = ask_regions(img)
-    print(f"3. Gemini {seconds:.1f}초, 덩어리 {len(regions)}개", flush=True)
+    regions, info = ask_regions(img)
+    print(f"3. Gemini {info['seconds']:.1f}초, 덩어리 {len(regions)}개", flush=True)
 
     h, w = mask.shape
     clean = remove_long_lines(mask)
@@ -398,7 +482,7 @@ def process(original, pen):
             }
         )
     print(f"4. 상자 다듬기 {len(cards)}개", flush=True)
-    return {"img": img, "corners": corners, "mask": mask, "cards": cards, "seconds": seconds}
+    return {"img": img, "corners": corners, "mask": mask, "cards": cards, **info}
 
 
 def run(photo_path, pen, out_root):
