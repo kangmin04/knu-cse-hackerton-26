@@ -199,7 +199,7 @@ class GeminiError(RuntimeError):
 
 RPM_LIMIT = 12  # 무료 등급 한도는 분당 15회. 여유를 두고 12회까지만 보낸다 (다시 시도 포함)
 RETRY_WAITS = (3, 6, 12)  # 다시 시도하기 전에 쉬는 초. 최대 3번 다시 시도
-RETRY_CODES = {500, 503, 504}  # 서버 쪽 일시 오류만 다시 시도한다
+RETRY_CODES = {408, 500, 502, 503, 504}  # 일시 오류(시간 초과·서버 오류)만 다시 시도한다
 # 요청 한 번을 기다리는 최대 초. 라이브러리의 시간 제한은 연결·받기 단계마다 따로 걸려서
 # 요청 전체를 막지 못한다 (실제로 312초 걸린 적 있음). 그래서 전체 시간을 직접 잰다.
 REQUEST_TIMEOUT = 30
@@ -213,7 +213,9 @@ def get_client():
     """Gemini 연결을 한 번만 만들어 다시 쓴다."""
     global _client
     if _client is None:
-        _client = genai.Client(http_options=types.HttpOptions(timeout=40_000))
+        # 단계별 시간 제한도 REQUEST_TIMEOUT으로 맞춘다. generate()가 시간 초과로 버린 요청이
+        # 뒤에서 오래 살아 있으면 다시 시도할 때마다 요청이 겹쳐 쌓이고 분당 한도도 잡아먹는다.
+        _client = genai.Client(http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT * 1000))
     return _client
 
 
@@ -275,6 +277,8 @@ def parse_regions(text):
 
     모델이 LaTeX 역슬래시를 하나만 보낼 때가 있다. \\lim 은 JSON 오류가 나고,
     \\frac·\\times 는 \\f(폼피드)·\\t(탭)으로 바뀌어 수식이 깨지므로 먼저 고친다.
+    한계: 진짜 줄바꿈 바로 뒤에 영어 글자가 붙으면(\\nThen) LaTeX 명령으로 보고 글자 그대로 남긴다.
+    LaTeX 명령(\\frac, \\theta, \\nabla …)이 훨씬 자주 나와서 이쪽을 택했다.
     """
     if not text:
         raise ValueError("빈 답")
@@ -282,14 +286,25 @@ def parse_regions(text):
     return NoteRegions.model_validate(json.loads(fixed, strict=False)).regions
 
 
+def empty_reason(response):
+    """빈 답이 온 이유를 짧게 (차단 이유나 생성이 끝난 이유)."""
+    feedback = getattr(response, "prompt_feedback", None)
+    if feedback and feedback.block_reason:
+        return f"차단: {feedback.block_reason}"
+    if response.candidates:
+        return f"끝난 이유: {response.candidates[0].finish_reason}"
+    return "답 후보 없음"
+
+
 def ask_regions(img):
     """Gemini에 덩어리를 물어본다.
 
     돌려주는 값: (덩어리 목록, 정보). 정보는 seconds(성공한 요청의 응답 시간),
     retries(다시 시도한 횟수), waited(한도·다시 시도로 기다린 초)
-    다시 시도: 서버 일시 오류(500·503·504), 연결 끊김, REQUEST_TIMEOUT초 넘게 답이 없음,
+    다시 시도: 일시 오류(408·500·502·503·504), 연결 끊김, REQUEST_TIMEOUT초 넘게 답이 없음,
     답이 끊기거나 깨짐
-    바로 멈춤: 사용 한도 초과(429), 키·모델 이름 문제처럼 다시 해도 안 되는 오류
+    바로 멈춤: 사용 한도 초과(429), 빈 답(안전 차단 등),
+    키·모델 이름 문제처럼 다시 해도 안 되는 오류
     끝내 실패하면 GeminiError를 던진다 (프로그램을 끝내지 않아서 서버에서도 쓸 수 있음).
     """
     image = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
@@ -302,6 +317,8 @@ def ask_regions(img):
         start = time.time()
         try:
             response = generate([image, PROMPT], config)
+            if not response.text:  # 안전 차단 등으로 빈 답이면 다시 해도 같으므로 바로 멈춘다
+                raise GeminiError(f"Gemini가 빈 답을 보냈어요({empty_reason(response)}).")
             regions = parse_regions(response.text)
             info = {"seconds": time.time() - start, "retries": attempt, "waited": waited}
             return regions, info
@@ -314,8 +331,10 @@ def ask_regions(img):
             reason = f"서버 오류 {error.code}"
         except httpx.TransportError:
             reason = "연결 끊김"
-        except TimeoutError:
+        except TimeoutError:  # OSError의 한 종류라 OSError보다 먼저 잡는다
             reason = f"{REQUEST_TIMEOUT}초 안에 답이 없음"
+        except OSError:  # httpx 밖에서 나는 연결 오류 (연결 재설정, SSL 오류 등)
+            reason = "연결 끊김"
         except ValueError:  # JSON 오류와 형식 검사(pydantic) 오류가 모두 ValueError
             reason = "답이 끊기거나 깨짐"
         if attempt == len(RETRY_WAITS):

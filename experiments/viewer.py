@@ -129,8 +129,10 @@ let file = null;
 let runs = [];          // 회차마다 { state: wait/run/ok/err, data, error, total, el }
 let current = null;     // 지금 보고 있는 것: 회차 번호(0부터) 또는 "all"
 let pen = null;         // 이번 처리에 쓴 펜 (처리 중에 바꿔도 영향 없게 시작할 때 고정)
+let photo = null;       // 이번 처리에 쓴 사진 (펜과 같은 이유로 시작할 때 고정)
+let running = false;
 
-$("file").onchange = () => { file = $("file").files[0]; $("go").disabled = !file; };
+$("file").onchange = () => { file = $("file").files[0]; $("go").disabled = !file || running; };
 const bgNow = () => document.querySelector("input[name=bg]:checked").value;
 document.querySelectorAll("input[name=bg]").forEach(r => r.onchange = () => {
   document.querySelectorAll(".inkbox").forEach(box => box.className = "inkbox bg-" + r.value);
@@ -286,7 +288,7 @@ async function runOnce(i) {
   const r = runs[i];
   r.state = "run"; r.t0 = performance.now();
   try {
-    const res = await fetch(`/run?pen=${pen}`, { method: "POST", body: file });
+    const res = await fetch(`/run?pen=${pen}`, { method: "POST", body: photo });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     r.data = data; r.state = "ok";
@@ -298,9 +300,19 @@ async function runOnce(i) {
   if (current === null || current === "all") show(current ?? i);   // 처음 끝난 회차를 바로 보여줌
 }
 
+// 도는 동안에는 사진·펜을 못 바꾸게 잠근다 (두 묶음이 동시에 돌거나 사진이 섞이지 않게)
+function lock(on) {
+  running = on;
+  $("go").disabled = $("save").disabled = $("file").disabled = on;
+  document.querySelectorAll("input[name=pen]").forEach(r => r.disabled = on);
+  if (!on) $("go").disabled = !file;
+}
+
 $("go").onclick = async () => {
-  $("go").disabled = $("save").disabled = true;
+  if (running || !file) return;
+  lock(true);
   pen = document.querySelector("input[name=pen]:checked").value;
+  photo = file;
   $("detail").innerHTML = ""; compareEl = null; current = null;
   runs = Array.from({ length: RUNS }, () => ({ state: "wait" }));
   refresh();
@@ -311,7 +323,7 @@ $("go").onclick = async () => {
   }
   clearInterval(ticker);
   refresh();
-  $("go").disabled = $("save").disabled = false;
+  lock(false);
 };
 
 document.addEventListener("keydown", e => {
@@ -327,9 +339,9 @@ document.addEventListener("keydown", e => {
 
 // 회차별 결과를 JSON으로 저장 (이미지는 빼고)
 $("save").onclick = () => {
-  const out = { file: file?.name, model: "__MODEL__", pen, runs: runs.map((r, i) => ({
+  const out = { file: photo?.name, model: "__MODEL__", pen, runs: runs.map((r, i) => ({
     run: i + 1, state: r.state, total_seconds: r.total, error: r.error, ...(r.data ? strip(r.data) : {}) })) };
-  const a = el("a"); a.download = `runs_${(file?.name || "photo").replace(/\.[^.]+$/, "")}_${pen}.json`;
+  const a = el("a"); a.download = `runs_${(photo?.name || "photo").replace(/\.[^.]+$/, "")}_${pen}.json`;
   a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 2)], { type: "application/json" }));
   a.click();
 };
