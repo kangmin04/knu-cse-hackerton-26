@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "experiments/out"
-OUT.mkdir(exist_ok=True)                 # 결과 폴더가 없으면 만든다
 
 IMAGE = ROOT / "samples/screen1.jpg"     # 읽을 사진. 필기만 뽑은 결과로 해 보려면 OUT / "5_preview.png"
 MODEL = "gemini-3.8-flash"
@@ -84,5 +83,6 @@ if __name__ == "__main__":
     else:
         sys.exit("5번 시도했지만 실패했어요. 잠시 뒤 다시 실행해 주세요.")
     print(result)
+    OUT.mkdir(exist_ok=True)                 # 결과 폴더가 없으면 만든다 (저장할 때만)
     (OUT / "6_gemini.json").write_text(result, encoding="utf-8")
     print(f"\n저장: {OUT / '6_gemini.json'}")
