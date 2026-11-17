@@ -399,6 +399,15 @@ document.querySelectorAll(".line").forEach(el => renderMathInElement(el, {{
 """
 
 
+def card_ink(img, mask, box):
+    """카드 상자 부분을 잘라 필기만 보이는 투명 배경 이미지(BGRA)로 만든다."""
+    x0, y0, x1, y1 = box
+    ink = np.zeros((y1 - y0, x1 - x0, 4), np.uint8)
+    ink[..., :3] = img[y0:y1, x0:x1]
+    ink[..., 3] = mask[y0:y1, x0:x1]  # 필기만 보이게
+    return ink
+
+
 def save(out_dir, name, img, mask, cards, seconds, corners):
     out_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_dir / "cropped.jpg"), img)
@@ -406,12 +415,8 @@ def save(out_dir, name, img, mask, cards, seconds, corners):
     html_cards = []
     for c in cards:
         x0, y0, x1, y1 = c["box"]
-        photo = img[y0:y1, x0:x1]
-        ink = np.zeros((y1 - y0, x1 - x0, 4), np.uint8)
-        ink[..., :3] = photo
-        ink[..., 3] = mask[y0:y1, x0:x1]  # 필기만 보이게
-        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}.jpg"), photo)
-        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}_ink.png"), ink)
+        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}.jpg"), img[y0:y1, x0:x1])
+        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}_ink.png"), card_ink(img, mask, c["box"]))
 
         cv2.rectangle(preview, (x0, y0), (x1, y1), (76, 90, 47), 2)
         cv2.putText(
