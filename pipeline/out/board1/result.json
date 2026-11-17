@@ -1,0 +1,158 @@
+{
+  "source": "board1.jpg",
+  "model": "gemini-3.5-flash-lite",
+  "seconds": 3.7,
+  "screen_found": false,
+  "size": [
+    1600,
+    1200
+  ],
+  "cards": [
+    {
+      "no": 1,
+      "title": "힘 법칙",
+      "lines": [
+        "력",
+        "법칙($\\vec{F}\\propto\\frac{1}{r^{2}}\\hat{e}_{r}$)",
+        "$\\frac{1}{4\\pi\\varepsilon_{0}}, \\frac{\\mu_{0}}{4\\pi}$"
+      ],
+      "box_gemini": [
+        0,
+        34,
+        358,
+        410
+      ],
+      "box": [
+        0,
+        80,
+        470,
+        421
+      ]
+    },
+    {
+      "no": 2,
+      "title": "전기장",
+      "lines": [
+        "전기장"
+      ],
+      "box_gemini": [
+        491,
+        28,
+        692,
+        60
+      ],
+      "box": [
+        491,
+        28,
+        692,
+        60
+      ]
+    },
+    {
+      "no": 3,
+      "title": "전기위치에너지",
+      "lines": [
+        "전기위치에너지",
+        "$U(\\infty)=0$ 의",
+        "힘$\\rightarrow$일(동시에",
+        "$W=-\\Delta U=$"
+      ],
+      "box_gemini": [
+        1209,
+        87,
+        1598,
+        423
+      ],
+      "box": [
+        1206,
+        108,
+        1600,
+        427
+      ]
+    },
+    {
+      "no": 4,
+      "title": "자기력",
+      "lines": [
+        "자기력",
+        "$\\vec{F}_{B}=q\\vec{v}\\times\\vec{B}$",
+        "$=i\\vec{L}\\times\\vec{B}$",
+        "\"오른손법칙\""
+      ],
+      "box_gemini": [
+        83,
+        650,
+        409,
+        1040
+      ],
+      "box": [
+        81,
+        612,
+        414,
+        1046
+      ]
+    },
+    {
+      "no": 5,
+      "title": "전기장 관련 요약",
+      "lines": [
+        "점전하, 전기 dipole, 전기쌍극자 $+ \\sum$",
+        "직선도선, 원형도선, 원판 $\\rightarrow S \\begin{cases} \\text{선전하밀도 } \\lambda \\\\ \\text{면 \" } \\sigma \\\\ \\text{부피 \" } \\rho \\end{cases}$"
+      ],
+      "box_gemini": [
+        484,
+        519,
+        1536,
+        740
+      ],
+      "box": [
+        464,
+        533,
+        1540,
+        779
+      ]
+    },
+    {
+      "no": 6,
+      "title": "응용 주제",
+      "lines": [
+        "J.S. Thomson",
+        "Hall effect",
+        "Uniformly circular motion in $\\vec{B}$"
+      ],
+      "box_gemini": [
+        457,
+        858,
+        720,
+        1045
+      ],
+      "box": [
+        451,
+        841,
+        719,
+        1085
+      ]
+    },
+    {
+      "no": 7,
+      "title": "자기장 (Biot-Savart)",
+      "lines": [
+        "자기장",
+        "$d\\vec{B}=\\frac{\\mu_{0}}{4\\pi}\\frac{i d\\vec{s}\\times\\hat{r}}{r^{2}}$ (Biot-Savart)",
+        "원형, 무한직선도선"
+      ],
+      "box_gemini": [
+        828,
+        727,
+        1598,
+        1029
+      ],
+      "box": [
+        813,
+        710,
+        1600,
+        1033
+      ]
+    }
+  ]
+}

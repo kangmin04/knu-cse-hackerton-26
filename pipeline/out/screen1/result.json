@@ -1,0 +1,88 @@
+{
+  "source": "screen1.jpg",
+  "model": "gemini-3.5-flash-lite",
+  "seconds": 2.3,
+  "screen_found": true,
+  "size": [
+    982,
+    792
+  ],
+  "cards": [
+    {
+      "no": 1,
+      "title": "기댓값 식 전개",
+      "lines": [
+        "$\\sum_{i} (a x_{i} + b) p_{i}$"
+      ],
+      "box_gemini": [
+        304,
+        342,
+        511,
+        400
+      ],
+      "box": [
+        298,
+        329,
+        515,
+        404
+      ]
+    },
+    {
+      "no": 2,
+      "title": "이산확률변수 기댓값",
+      "lines": [
+        "$\\sum_{i} x_{i} \\cdot p_{i} \\Rightarrow$"
+      ],
+      "box_gemini": [
+        41,
+        342,
+        276,
+        456
+      ],
+      "box": [
+        40,
+        336,
+        280,
+        464
+      ]
+    },
+    {
+      "no": 3,
+      "title": "확률변수 함수의 형태",
+      "lines": [
+        "$aX + b$"
+      ],
+      "box_gemini": [
+        381,
+        383,
+        771,
+        610
+      ],
+      "box": [
+        371,
+        350,
+        788,
+        626
+      ]
+    },
+    {
+      "no": 4,
+      "title": "연속확률변수 기댓값",
+      "lines": [
+        "$\\int x \\cdot f(x)$"
+      ],
+      "box_gemini": [
+        54,
+        488,
+        274,
+        663
+      ],
+      "box": [
+        58,
+        470,
+        278,
+        668
+      ]
+    }
+  ]
+}

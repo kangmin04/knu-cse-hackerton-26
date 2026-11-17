@@ -9,6 +9,5 @@ __pycache__/
 .vscode/
 dist/
 build/
-.claude/settings.local.json
-
 .token-optimizer/
+.claude/settings.local.json

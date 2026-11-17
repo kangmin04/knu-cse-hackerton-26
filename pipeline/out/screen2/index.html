@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>screen2.jpg</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<style>
+body { margin: 0; padding: 24px; background: #e8ece8; color: #1f2623; font-family: -apple-system, "Apple SD Gothic Neo", sans-serif; }
+h1 { font-size: 18px; margin: 0 0 4px; }
+.meta { color: #6b746f; font-size: 13px; margin-bottom: 16px; }
+.top { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }
+.top img { max-width: 520px; width: 100%; border: 1px solid #c9d0cb; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+.card { background: #fff; border: 2px solid #fff; border-radius: 10px; box-shadow: 0 2px 0 #c9d0cb; padding: 12px; display: grid; gap: 10px; }
+.card h2 { font-size: 14px; margin: 0; }
+.ink { background: repeating-conic-gradient(#f1f3f1 0 25%, #fff 0 50%) 0 0 / 14px 14px; border-radius: 6px; padding: 6px; }
+.ink img { max-width: 100%; display: block; }
+.line { font-size: 15px; line-height: 1.7; }
+</style></head><body>
+<h1>screen2.jpg</h1>
+<div class="meta">gemini-3.5-flash-lite · 3.7초 · 카드 11개 · 화면 찾음</div>
+<div class="top"><img src="boxes.jpg" alt="덩어리 위치"></div>
+<div class="cards"><div class="card"><h2>1. 무한 기호</h2><div class="ink"><img src="card_01_ink.png" alt=""></div><div class="line">$\infty$</div></div><div class="card"><h2>2. 극한 계산 필기</h2><div class="ink"><img src="card_02_ink.png" alt=""></div><div class="line">$lim_{x \to \infty} \frac{\ln x}{x}$</div><div class="line">$H$</div><div class="line">$lim_{x \to \infty} \frac{1}{x} = 0$</div><div class="line">부정형 꼴 0X</div></div><div class="card"><h2>3. 적분 판정법 관련 필기</h2><div class="ink"><img src="card_03_ink.png" alt=""></div><div class="line">$f(n)$</div><div class="line">$lim_{n \to \infty} \frac{\ln n}{n} = 0$</div></div><div class="card"><h2>4. 급수 합 값</h2><div class="ink"><img src="card_04_ink.png" alt=""></div><div class="line">$\frac{\pi^2}{6}$</div></div><div class="card"><h2>5. 급수의 일반항</h2><div class="ink"><img src="card_05_ink.png" alt=""></div><div class="line">$\frac{\ln n}{n}$</div></div><div class="card"><h2>6. 조건 확인</h2><div class="ink"><img src="card_06_ink.png" alt=""></div><div class="line">$: C. P. on [1, \infty)$</div></div><div class="card"><h2>7. 함수 성질</h2><div class="ink"><img src="card_07_ink.png" alt=""></div><div class="line">$f:$ 감소 on $[e, \infty)$</div></div><div class="card"><h2>8. 적분 풀이</h2><div class="ink"><img src="card_08_ink.png" alt=""></div><div class="line">$\to \int_{3}^{\infty} \frac{\ln x}{x} dx = lim_{t \to \infty} \int_{3}^{t} \frac{1}{x} \ln x dx$</div><div class="line">$[?]$</div><div class="line">$= lim_{t \to \infty} \frac{1}{2} [(\ln x)^2]_{3}^{t}$</div><div class="line">$= \frac{1}{2} lim_{t \to \infty} ((\ln t)^2 - (\ln 3)^2) = \infty : D$</div></div><div class="card"><h2>9. 도함수 부호</h2><div class="ink"><img src="card_09_ink.png" alt=""></div><div class="line">$f&#x27;(x) = \frac{1 - \ln x}{(x^2)+} &lt; 0$</div></div><div class="card"><h2>10. 부등식 풀이</h2><div class="ink"><img src="card_10_ink.png" alt=""></div><div class="line">$\to 1 - \ln x &lt; 0$</div><div class="line">$\to \ln x &gt; 1 \to x &gt; e$</div></div><div class="card"><h2>11. 결론 요약</h2><div class="ink"><img src="card_11_ink.png" alt=""></div><div class="line">20분 전</div><div class="line">$\to \sum \frac{\ln n}{n} : D$</div><div class="line">$\to \sum \frac{\ln n}{n} : D$</div></div></div>
+<script>
+document.querySelectorAll(".line").forEach(el => renderMathInElement(el, {
+  delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false }));
+</script>
+</body></html>

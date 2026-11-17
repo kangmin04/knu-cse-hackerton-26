@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>screen1.jpg</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<style>
+body { margin: 0; padding: 24px; background: #e8ece8; color: #1f2623; font-family: -apple-system, "Apple SD Gothic Neo", sans-serif; }
+h1 { font-size: 18px; margin: 0 0 4px; }
+.meta { color: #6b746f; font-size: 13px; margin-bottom: 16px; }
+.top { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }
+.top img { max-width: 520px; width: 100%; border: 1px solid #c9d0cb; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+.card { background: #fff; border: 2px solid #fff; border-radius: 10px; box-shadow: 0 2px 0 #c9d0cb; padding: 12px; display: grid; gap: 10px; }
+.card h2 { font-size: 14px; margin: 0; }
+.ink { background: repeating-conic-gradient(#f1f3f1 0 25%, #fff 0 50%) 0 0 / 14px 14px; border-radius: 6px; padding: 6px; }
+.ink img { max-width: 100%; display: block; }
+.line { font-size: 15px; line-height: 1.7; }
+</style></head><body>
+<h1>screen1.jpg</h1>
+<div class="meta">gemini-3.5-flash-lite · 2.3초 · 카드 4개 · 화면 찾음</div>
+<div class="top"><img src="boxes.jpg" alt="덩어리 위치"></div>
+<div class="cards"><div class="card"><h2>1. 기댓값 식 전개</h2><div class="ink"><img src="card_01_ink.png" alt=""></div><div class="line">$\sum_{i} (a x_{i} + b) p_{i}$</div></div><div class="card"><h2>2. 이산확률변수 기댓값</h2><div class="ink"><img src="card_02_ink.png" alt=""></div><div class="line">$\sum_{i} x_{i} \cdot p_{i} \Rightarrow$</div></div><div class="card"><h2>3. 확률변수 함수의 형태</h2><div class="ink"><img src="card_03_ink.png" alt=""></div><div class="line">$aX + b$</div></div><div class="card"><h2>4. 연속확률변수 기댓값</h2><div class="ink"><img src="card_04_ink.png" alt=""></div><div class="line">$\int x \cdot f(x)$</div></div></div>
+<script>
+document.querySelectorAll(".line").forEach(el => renderMathInElement(el, {
+  delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false }));
+</script>
+</body></html>
