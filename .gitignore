@@ -15,7 +15,7 @@ build/
 # Xcode 개인 설정
 xcuserdata/
 # 실행 인자(서버 주소 등)가 개인마다 달라서 스킴은 올리지 않는다
-xcshareddata/xcschemes/
+**/xcshareddata/xcschemes/
 
 # superpowers 계획·설계 문서 (로컬 전용)
 docs/superpowers/
