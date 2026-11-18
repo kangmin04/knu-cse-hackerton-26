@@ -21,14 +21,18 @@ import argparse
 import html
 import json
 import os
+import re
 import sys
+import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
+import httpx
 import numpy as np
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -189,29 +193,163 @@ def load_api_key():
         sys.exit(f"API 키가 없어요. {env_file} 에 GEMINI_API_KEY=발급받은키 한 줄을 넣어 주세요.")
 
 
-def ask_regions(img, tries=4):
-    """Gemini에 덩어리를 물어본다. 서버가 바쁘거나 답이 끊겨 오면 다시 시도한다."""
-    client = genai.Client(http_options=types.HttpOptions(timeout=40_000))
+class GeminiError(RuntimeError):
+    """Gemini에 요청했지만 끝내 답을 받지 못함."""
+
+
+RPM_LIMIT = 12  # 무료 등급 한도는 분당 15회. 여유를 두고 12회까지만 보낸다 (다시 시도 포함)
+RETRY_WAITS = (3, 6, 12)  # 다시 시도하기 전에 쉬는 초. 최대 3번 다시 시도
+RETRY_CODES = {408, 500, 502, 503, 504}  # 일시 오류(시간 초과·서버 오류)만 다시 시도한다
+# 요청 한 번을 기다리는 최대 초. 라이브러리의 시간 제한은 연결·받기 단계마다 따로 걸려서
+# 요청 전체를 막지 못한다 (실제로 312초 걸린 적 있음). 그래서 전체 시간을 직접 잰다.
+REQUEST_TIMEOUT = 30
+
+_calls = deque()  # 최근 60초 동안 보낸 요청 시각
+_calls_lock = threading.Lock()  # 서버에서 여러 요청이 동시에 들어와도 한도를 지키도록
+_client = None
+
+
+def get_client():
+    """Gemini 연결을 한 번만 만들어 다시 쓴다."""
+    global _client
+    if _client is None:
+        # 단계별 시간 제한도 REQUEST_TIMEOUT으로 맞춘다. generate()가 시간 초과로 버린 요청이
+        # 뒤에서 오래 살아 있으면 다시 시도할 때마다 요청이 겹쳐 쌓이고 분당 한도도 잡아먹는다.
+        _client = genai.Client(http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT * 1000))
+    return _client
+
+
+def generate(contents, config):
+    """Gemini 요청을 한 번 보내고 REQUEST_TIMEOUT초까지만 기다린다. 넘으면 TimeoutError.
+
+    요청은 별도 스레드에서 보내고, 시간이 넘으면 기다리지 않고 버린다 (뒤에서 끝나도 결과는 안 씀).
+    """
+    box = {}
+
+    def work():
+        try:
+            box["response"] = get_client().models.generate_content(
+                model=MODEL, contents=contents, config=config
+            )
+        except Exception as error:  # 오류는 부른 쪽에서 다시 던진다
+            box["error"] = error
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(REQUEST_TIMEOUT)
+    if worker.is_alive():
+        raise TimeoutError(f"{REQUEST_TIMEOUT}초 안에 답이 없음")
+    if "error" in box:
+        raise box["error"]
+    return box["response"]
+
+
+def wait_for_slot():
+    """최근 60초 동안 보낸 요청이 RPM_LIMIT개면 자리가 날 때까지 기다린다. 기다린 초를 돌려준다."""
+    waited = 0.0
+    while True:
+        with _calls_lock:
+            now = time.time()
+            while _calls and now - _calls[0] > 60:
+                _calls.popleft()
+            if len(_calls) < RPM_LIMIT:
+                _calls.append(now)
+                return waited
+            pause = 60 - (now - _calls[0]) + 0.1
+        print(f"  분당 {RPM_LIMIT}회 도달 → {pause:.0f}초 대기", flush=True)
+        time.sleep(pause)
+        waited += pause
+
+
+def _fix_escape(match):
+    """JSON에서 올바른 이스케이프만 두고, 나머지 역슬래시는 두 개로 바꾼다."""
+    s = match.group(0)
+    valid = (
+        s in ("\\\\", '\\"', "\\/")
+        or re.fullmatch(r"\\u[0-9a-fA-F]{4}", s)
+        or (len(s) == 2 and s[1] in "bfnrt")
+    )
+    return s if valid else "\\" + s
+
+
+def parse_regions(text):
+    """Gemini 답(JSON 글자)을 덩어리 목록으로 바꾼다. 끊기거나 깨진 답이면 ValueError.
+
+    모델이 LaTeX 역슬래시를 하나만 보낼 때가 있다. \\lim 은 JSON 오류가 나고,
+    \\frac·\\times 는 \\f(폼피드)·\\t(탭)으로 바뀌어 수식이 깨지므로 먼저 고친다.
+    한계: 진짜 줄바꿈 바로 뒤에 영어 글자가 붙으면(\\nThen) LaTeX 명령으로 보고 글자 그대로 남긴다.
+    LaTeX 명령(\\frac, \\theta, \\nabla …)이 훨씬 자주 나와서 이쪽을 택했다.
+    """
+    if not text:
+        raise ValueError("빈 답")
+    fixed = re.sub(r'\\(\\|"|/|u[0-9a-fA-F]{4}|[a-zA-Z]+|.)', _fix_escape, text)
+    return NoteRegions.model_validate(json.loads(fixed, strict=False)).regions
+
+
+def empty_reason(response):
+    """빈 답이 온 이유를 짧게 (차단 이유나 생성이 끝난 이유)."""
+    feedback = getattr(response, "prompt_feedback", None)
+    if feedback and feedback.block_reason:
+        return f"차단: {feedback.block_reason}"
+    if response.candidates:
+        return f"끝난 이유: {response.candidates[0].finish_reason}"
+    return "답 후보 없음"
+
+
+def ask_regions(img):
+    """Gemini에 덩어리를 물어본다.
+
+    돌려주는 값: (덩어리 목록, 정보). 정보는 seconds(성공한 요청의 응답 시간),
+    retries(다시 시도한 횟수), waited(한도·다시 시도로 기다린 초)
+    다시 시도: 일시 오류(408·500·502·503·504), 연결 끊김, REQUEST_TIMEOUT초 넘게 답이 없음,
+    답이 끊기거나 깨짐
+    바로 멈춤: 사용 한도 초과(429), 빈 답(안전 차단 등),
+    키·모델 이름 문제처럼 다시 해도 안 되는 오류
+    끝내 실패하면 GeminiError를 던진다 (프로그램을 끝내지 않아서 서버에서도 쓸 수 있음).
+    """
     image = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     config = types.GenerateContentConfig(
         response_mime_type="application/json", response_schema=NoteRegions, temperature=0.1
     )
-    for attempt in range(tries):
+    waited = 0.0
+    for attempt in range(len(RETRY_WAITS) + 1):
+        waited += wait_for_slot()
         start = time.time()
         try:
-            response = client.models.generate_content(
-                model=MODEL, contents=[image, PROMPT], config=config
-            )
-            result = NoteRegions.model_validate_json(response.text)  # 끊긴 답이면 여기서 오류
-            return result.regions, time.time() - start
-        except Exception as error:
-            text = str(error)
-            if "API key" in text or "404" in text:
-                raise  # 키나 모델 이름 문제는 다시 해도 안 됨
-            reason = "답이 중간에 끊김" if "validation error" in text else text[:70]
-            print(f"  Gemini 실패: {reason} ({attempt + 1}/{tries})", flush=True)
-            time.sleep(5 * (attempt + 1))
-    sys.exit(f"Gemini에 {tries}번 요청했지만 실패했어요. 잠시 뒤 다시 실행해 주세요.")
+            response = generate([image, PROMPT], config)
+            if not response.text:  # 안전 차단 등으로 빈 답이면 다시 해도 같으므로 바로 멈춘다
+                raise GeminiError(f"Gemini가 빈 답을 보냈어요({empty_reason(response)}).")
+            regions = parse_regions(response.text)
+            info = {"seconds": time.time() - start, "retries": attempt, "waited": waited}
+            return regions, info
+        except errors.APIError as error:
+            if error.code == 429:
+                message = "Gemini 사용 한도를 넘었어요(429). 잠시 뒤 다시 시도해 주세요."
+                raise GeminiError(message) from error
+            if error.code not in RETRY_CODES:
+                raise GeminiError(f"Gemini 요청 실패({error.code}): {error.message}") from error
+            reason = f"서버 오류 {error.code}"
+        except httpx.TransportError:
+            reason = "연결 끊김"
+        except TimeoutError:  # OSError의 한 종류라 OSError보다 먼저 잡는다
+            reason = f"{REQUEST_TIMEOUT}초 안에 답이 없음"
+        except OSError:  # httpx 밖에서 나는 연결 오류 (연결 재설정, SSL 오류 등)
+            reason = "연결 끊김"
+        except ValueError:  # JSON 오류와 형식 검사(pydantic) 오류가 모두 ValueError
+            reason = "답이 끊기거나 깨짐"
+        if attempt == len(RETRY_WAITS):
+            break
+        pause = RETRY_WAITS[attempt]
+        print(
+            f"  Gemini 실패: {reason} → {pause}초 뒤 다시 시도 ({attempt + 1}/{len(RETRY_WAITS)})",
+            flush=True,
+        )
+        time.sleep(pause)
+        waited += pause
+    raise GeminiError(
+        f"Gemini에 {len(RETRY_WAITS) + 1}번 요청했지만 실패했어요({reason}). "
+        "잠시 뒤 다시 실행해 주세요."
+    )
 
 
 # ─────────────────────────────────────────────
@@ -309,6 +447,15 @@ document.querySelectorAll(".line").forEach(el => renderMathInElement(el, {{
 """
 
 
+def card_ink(img, mask, box):
+    """카드 상자 부분을 잘라 필기만 보이는 투명 배경 이미지(BGRA)로 만든다."""
+    x0, y0, x1, y1 = box
+    ink = np.zeros((y1 - y0, x1 - x0, 4), np.uint8)
+    ink[..., :3] = img[y0:y1, x0:x1]
+    ink[..., 3] = mask[y0:y1, x0:x1]  # 필기만 보이게
+    return ink
+
+
 def save(out_dir, name, img, mask, cards, seconds, corners):
     out_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_dir / "cropped.jpg"), img)
@@ -316,12 +463,8 @@ def save(out_dir, name, img, mask, cards, seconds, corners):
     html_cards = []
     for c in cards:
         x0, y0, x1, y1 = c["box"]
-        photo = img[y0:y1, x0:x1]
-        ink = np.zeros((y1 - y0, x1 - x0, 4), np.uint8)
-        ink[..., :3] = photo
-        ink[..., 3] = mask[y0:y1, x0:x1]  # 필기만 보이게
-        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}.jpg"), photo)
-        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}_ink.png"), ink)
+        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}.jpg"), img[y0:y1, x0:x1])
+        cv2.imwrite(str(out_dir / f"card_{c['no']:02d}_ink.png"), card_ink(img, mask, c["box"]))
 
         cv2.rectangle(preview, (x0, y0), (x1, y1), (76, 90, 47), 2)
         cv2.putText(
@@ -353,12 +496,13 @@ def save(out_dir, name, img, mask, cards, seconds, corners):
     )
 
 
-def run(photo_path, pen, out_root):
-    photo_path = Path(photo_path)
-    original = cv2.imread(str(photo_path))
-    if original is None:
-        sys.exit(f"사진을 읽지 못했어요: {photo_path}")
+def process(original, pen):
+    """사진(BGR 배열) 한 장을 처리해 결과를 돌려준다. 파일은 만들지 않는다.
 
+    돌려주는 값: img(잘라낸 사진), corners(화면 모서리, 못 찾으면 None), mask(필기 마스크),
+    cards(덩어리 카드 목록), seconds(Gemini 응답 시간), retries(Gemini 다시 시도 횟수),
+    waited(한도·다시 시도로 기다린 초)
+    """
     img, corners = crop_slide(original, pen)
     print(
         f"1. 화면 {'찾아서 잘라냄' if corners is not None else '자르지 않음'} "
@@ -369,8 +513,8 @@ def run(photo_path, pen, out_root):
     mask = ink_mask(img, pen)
     print(f"2. 필기 마스크 ({pen})", flush=True)
 
-    regions, seconds = ask_regions(img)
-    print(f"3. Gemini {seconds:.1f}초, 덩어리 {len(regions)}개", flush=True)
+    regions, info = ask_regions(img)
+    print(f"3. Gemini {info['seconds']:.1f}초, 덩어리 {len(regions)}개", flush=True)
 
     h, w = mask.shape
     clean = remove_long_lines(mask)
@@ -391,9 +535,31 @@ def run(photo_path, pen, out_root):
             }
         )
     print(f"4. 상자 다듬기 {len(cards)}개", flush=True)
+    return {"img": img, "corners": corners, "mask": mask, "cards": cards, **info}
+
+
+def run(photo_path, pen, out_root):
+    """사진 파일을 처리해 결과 폴더에 저장한다 (명령줄 실행용)."""
+    photo_path = Path(photo_path)
+    original = cv2.imread(str(photo_path))
+    if original is None:
+        sys.exit(f"사진을 읽지 못했어요: {photo_path}")
+
+    try:
+        result = process(original, pen)
+    except GeminiError as error:
+        sys.exit(str(error))
 
     out_dir = Path(out_root) / photo_path.stem
-    save(out_dir, photo_path.name, img, mask, cards, seconds, corners)
+    save(
+        out_dir,
+        photo_path.name,
+        result["img"],
+        result["mask"],
+        result["cards"],
+        result["seconds"],
+        result["corners"],
+    )
     print(f"5. 저장: {out_dir}/index.html", flush=True)
     return out_dir
 
