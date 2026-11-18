@@ -5,12 +5,15 @@
   2. OpenCV: 펜 종류에 맞게 필기만 남긴 마스크를 만든다
   3. Gemini: 필기를 의미 단위 덩어리로 나누고, 덩어리마다 위치·제목·글자(LaTeX)를 받는다
   4. OpenCV: Gemini가 준 대략적인 상자를 필기 경계에 맞게 다듬는다
+     숫자 정렬 블록(세로셈·나눗셈·진리표 등)은 원본 해상도로 잘라 Gemini에 줄 단위로 다시 읽히고,
+     가로 작대기는 OpenCV로 찾아 판서 모양(열 위치) 그대로 다시 그린다. 연산 종류는 판단하지 않는다.
   5. 덩어리마다 원본 조각, 투명 배경 필기 이미지, 결과 json, 확인용 html을 저장한다
 
 실행
   python3 pipeline/note_pipeline.py samples/screen2.jpg --pen black
   python3 pipeline/note_pipeline.py samples/screen1.jpg --pen red
   python3 pipeline/note_pipeline.py samples/board1.jpg --pen board
+  python3 pipeline/note_pipeline.py samples/screen_binary-calculate.jpeg --pen red
 
 필요한 것
   pip install -r pipeline/requirements.txt
@@ -37,7 +40,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
 
 # ─────────────────────────────────────────────
@@ -97,20 +100,41 @@ def find_screen(img):
     return None if best is None else best / scale
 
 
-def crop_slide(img, pen, max_side=1600):
-    """화면을 찾아 펴서 돌려준다. 칠판이거나 못 찾으면 크기만 줄여서 돌려준다."""
+def straighten(img, pen, margin=0.12):
+    """화면을 찾아 원본 해상도 그대로 펴서 돌려준다. 칠판이거나 못 찾으면 원본을 돌려준다.
+
+    찾은 사각형이 화면 전체가 아니라 슬라이드 안쪽 상자일 수 있고, 판서가 그 밖으로
+    삐져나오기도 하므로 사방에 margin 비율만큼 여백을 두고 자른다.
+    """
     corners = find_screen(img) if pen != "board" else None
-    out = img
-    if corners is not None:
-        tl, tr, br, bl = corners
-        w = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
-        h = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
-        dst = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
-        out = cv2.warpPerspective(img, cv2.getPerspectiveTransform(corners, dst), (w, h))
-    k = max_side / max(out.shape[:2])
-    if k < 1:
-        out = cv2.resize(out, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    if corners is None:
+        return img, None
+    tl, tr, br, bl = corners
+    w = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
+    h = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
+    mx, my = int(w * margin), int(h * margin)
+    dst = np.float32([[mx, my], [mx + w, my], [mx + w, my + h], [mx, my + h]])
+    out = cv2.warpPerspective(
+        img,
+        cv2.getPerspectiveTransform(corners, dst),
+        (w + 2 * mx, h + 2 * my),
+        borderMode=cv2.BORDER_REPLICATE,  # 사진 밖으로 나간 부분은 검은색 대신 가장자리로 채움
+    )
     return out, corners
+
+
+def shrink(img, max_side):
+    """긴 변이 max_side보다 크면 줄인다."""
+    k = max_side / max(img.shape[:2])
+    if k >= 1:
+        return img
+    return cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+
+
+def crop_slide(img, pen, max_side=1600):
+    """화면을 찾아 펴고 긴 변을 max_side로 줄여 돌려준다."""
+    out, corners = straighten(img, pen)
+    return shrink(out, max_side), corners
 
 
 # ─────────────────────────────────────────────
@@ -158,6 +182,12 @@ class NoteRegion(BaseModel):
         description="덩어리를 감싸는 상자 [ymin, xmin, ymax, xmax]. 이미지를 0~1000으로 본 좌표"
     )
     title: str = Field(description="이 덩어리가 무엇인지 짧게 (예: f'(x) 부호 확인, 로피탈 계산)")
+    kind: str = Field(
+        description=(
+            "aligned: 숫자가 여러 줄로 열을 맞춰 쌓인 블록 (세로셈·나눗셈·진리표 등). "
+            "text: 그 밖의 필기"
+        )
+    )
     lines: list[str] = Field(
         description="덩어리 안의 손글씨를 쓰인 순서대로 한 줄씩. 수식 부분만 $...$ 로 감싼 LaTeX"
     )
@@ -179,6 +209,17 @@ PROMPT = """
 3. box_2d는 그 덩어리의 손글씨를 빠짐없이 감싸되 최대한 꼭 맞게.
 4. lines에는 쓰여 있는 내용만 옮겨. 해설을 덧붙이지 말고, 읽을 수 없으면 [?].
 5. 덩어리는 위에서 아래, 왼쪽에서 오른쪽 순서로.
+
+[있는 그대로 옮기기]
+6. 필기를 '추출'하는 게 목적이야. 계산이 틀려 보여도 고치거나 다시 계산하지 말고 쓰인 그대로 옮겨.
+7. 빨강·검정·노랑·파랑 등 펜 색이 달라도 모두 필기야.
+   다른 색으로 덧쓴 값, 동그라미 친 값도 빠뜨리지 마.
+
+[숫자 정렬 블록]
+8. 세로셈·나눗셈·진리표처럼 숫자가 여러 줄로 열을 맞춰 쌓인 필기는 kind를 "aligned", 그 밖은 "text".
+   어떤 연산인지는 따지지 말고, 위에 쓴 결과·중간 줄·맨 아래 값·다른 색으로 쓴 값까지
+   그 풀이 전체를 한 덩어리로 묶어.
+   lines에는 줄마다 숫자·부호만 공백 없이 옮기고 $ 로 감싸지 마. 점선·화살표는 빼.
 """
 
 
@@ -202,7 +243,7 @@ RETRY_WAITS = (3, 6, 12)  # 다시 시도하기 전에 쉬는 초. 최대 3번 �
 RETRY_CODES = {408, 500, 502, 503, 504}  # 일시 오류(시간 초과·서버 오류)만 다시 시도한다
 # 요청 한 번을 기다리는 최대 초. 라이브러리의 시간 제한은 연결·받기 단계마다 따로 걸려서
 # 요청 전체를 막지 못한다 (실제로 312초 걸린 적 있음). 그래서 전체 시간을 직접 잰다.
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = 60  # flash는 정상일 때도 한 번에 10~20초 걸려서 30초면 빠듯하다
 
 _calls = deque()  # 최근 60초 동안 보낸 요청 시각
 _calls_lock = threading.Lock()  # 서버에서 여러 요청이 동시에 들어와도 한도를 지키도록
@@ -280,10 +321,15 @@ def parse_regions(text):
     한계: 진짜 줄바꿈 바로 뒤에 영어 글자가 붙으면(\\nThen) LaTeX 명령으로 보고 글자 그대로 남긴다.
     LaTeX 명령(\\frac, \\theta, \\nabla …)이 훨씬 자주 나와서 이쪽을 택했다.
     """
+    return parse_json(text, NoteRegions).regions
+
+
+def parse_json(text, schema):
+    """Gemini 답(JSON 글자)을 schema로 바꾼다. 끊기거나 깨진 답이면 ValueError."""
     if not text:
         raise ValueError("빈 답")
     fixed = re.sub(r'\\(\\|"|/|u[0-9a-fA-F]{4}|[a-zA-Z]+|.)', _fix_escape, text)
-    return NoteRegions.model_validate(json.loads(fixed, strict=False)).regions
+    return schema.model_validate(json.loads(fixed, strict=False))
 
 
 def empty_reason(response):
@@ -297,9 +343,16 @@ def empty_reason(response):
 
 
 def ask_regions(img):
-    """Gemini에 덩어리를 물어본다.
+    """Gemini에 덩어리를 물어본다. 돌려주는 값과 실패 처리는 ask_gemini와 같다."""
+    image = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    result, info = ask_gemini([image, PROMPT], NoteRegions)
+    return result.regions, info
 
-    돌려주는 값: (덩어리 목록, 정보). 정보는 seconds(성공한 요청의 응답 시간),
+
+def ask_gemini(contents, schema, temperature=0.1):
+    """Gemini에 요청하고 답을 schema로 받는다.
+
+    돌려주는 값: (schema 객체, 정보). 정보는 seconds(성공한 요청의 응답 시간),
     retries(다시 시도한 횟수), waited(한도·다시 시도로 기다린 초)
     다시 시도: 일시 오류(408·500·502·503·504), 연결 끊김, REQUEST_TIMEOUT초 넘게 답이 없음,
     답이 끊기거나 깨짐
@@ -307,21 +360,20 @@ def ask_regions(img):
     키·모델 이름 문제처럼 다시 해도 안 되는 오류
     끝내 실패하면 GeminiError를 던진다 (프로그램을 끝내지 않아서 서버에서도 쓸 수 있음).
     """
-    image = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     config = types.GenerateContentConfig(
-        response_mime_type="application/json", response_schema=NoteRegions, temperature=0.1
+        response_mime_type="application/json", response_schema=schema, temperature=temperature
     )
     waited = 0.0
     for attempt in range(len(RETRY_WAITS) + 1):
         waited += wait_for_slot()
         start = time.time()
         try:
-            response = generate([image, PROMPT], config)
+            response = generate(contents, config)
             if not response.text:  # 안전 차단 등으로 빈 답이면 다시 해도 같으므로 바로 멈춘다
                 raise GeminiError(f"Gemini가 빈 답을 보냈어요({empty_reason(response)}).")
-            regions = parse_regions(response.text)
+            parsed = parse_json(response.text, schema)
             info = {"seconds": time.time() - start, "retries": attempt, "waited": waited}
-            return regions, info
+            return parsed, info
         except errors.APIError as error:
             if error.code == 429:
                 message = "Gemini 사용 한도를 넘었어요(429). 잠시 뒤 다시 시도해 주세요."
@@ -411,6 +463,316 @@ def refine_box(mask, box, link=0.006, max_grow=0.3, belong=0.4, pad=6):
 
 
 # ─────────────────────────────────────────────
+# 4-1. 숫자 정렬 블록을 판서 모양 그대로 읽기
+# ─────────────────────────────────────────────
+
+
+class GridRow(BaseModel):
+    kind: str = Field(description="digits: 숫자·부호가 적힌 줄 / rule: 가로로 그은 작대기")
+    text: str = Field(
+        description=(
+            "digits면 보이는 문자를 왼쪽부터 공백 없이 그대로 (숫자, + - × ÷ ⊕ = 같은 부호, "
+            "나눗셈 괄호 ')' 포함). rule이면 빈 문자열"
+        )
+    )
+    box_2d: list[int] = Field(
+        description="이 줄을 감싸는 상자 [ymin, xmin, ymax, xmax]. 이 이미지를 0~1000으로 본 좌표"
+    )
+    circled: bool = Field(description="동그라미나 네모로 감싼 값이면 true")
+    color: str = Field(description="펜 색. red, black, blue, green, yellow, white 중 하나")
+
+
+class Grid(BaseModel):
+    rows: list[GridRow]
+
+
+GRID_PROMPT = """
+이 이미지는 판서 사진에서 '숫자 정렬 블록'(세로셈·나눗셈·진리표처럼 숫자가 줄과 열을 맞춰
+쌓인 손글씨) 부분만 확대한 거야. 판서 모양을 그대로 다시 그릴 수 있게,
+위에서 아래로 모든 줄을 rows에 옮겨 줘.
+
+1. 계산하거나 고치지 마. 틀려 보여도 쓰인 그대로. 어떤 연산인지도 따지지 마.
+2. digits 줄: 같은 높이에 쓰인 숫자·부호를 왼쪽부터 공백 없이 한 줄로.
+   - 나눗셈 모양이면 제수, 괄호 ')', 피제수를 한 줄로. 예: "1011)1001000"
+   - 줄 앞에 쓴 부호(+, -, ×, ⊕ 등)도 그 줄 text 맨 앞에 넣어.
+   - 세로 막대 모양은 1, 동그라미 모양은 0. 숫자를 하나하나 세어 자릿수를 정확히.
+   - 숫자끼리 붙어 있어도 하나씩 따로 세. 예: 붙어 쓴 "10"은 1과 0 두 글자.
+   - 휘거나 기울어진 세로 획도 1이야. 괄호 ')'는 제수와 피제수 사이에 있을 때만 괄호로 적어.
+3. rule 줄: 숫자 줄 사이에 가로로 그은 작대기 (빼기 결과 위의 줄, 나눗셈 괄호 위의 가로선).
+4. box_2d는 그 줄의 왼쪽 끝부터 오른쪽 끝까지 꼭 맞게. 열 맞춤에 쓰이니 x 좌표를 특히 정확히.
+5. 점선, 화살표(↓), 물결 밑줄, 안내선은 옮기지 마.
+6. 펜 색이 달라도 모두 옮겨. 동그라미 친 값은 circled를 true로.
+7. 이미지 가장자리에 잘려 들어온 다른 필기는 무시해.
+"""
+
+GRID_MAX_SIDE = 2000  # 2차 요청에 보내는 확대 조각의 최대 크기
+
+
+def read_grid(full, scale, box, pad=0.06):
+    """숫자 정렬 블록을 원본 해상도로 잘라 Gemini에 줄 단위로 다시 읽힌다.
+
+    full: 원본 해상도로 편 사진, scale: full과 작업용 사진의 배율, box: 작업용 사진 기준 상자
+    돌려주는 값: (줄 목록, 정보). 줄의 좌표는 작업용 사진 기준 픽셀 (x0, y0, x1, y1)
+    """
+    x0, y0, x1, y1 = box
+    px, py = int((x1 - x0) * pad) + 4, int((y1 - y0) * pad) + 4
+    h, w = full.shape[0] / scale, full.shape[1] / scale
+    cx0, cy0 = max(0, x0 - px), max(0, y0 - py)
+    cx1, cy1 = min(w, x1 + px), min(h, y1 + py)
+    crop = full[int(cy0 * scale) : int(cy1 * scale), int(cx0 * scale) : int(cx1 * scale)]
+    image = Image.fromarray(cv2.cvtColor(shrink(crop, GRID_MAX_SIDE), cv2.COLOR_BGR2RGB))
+    grid, info = ask_gemini([image, GRID_PROMPT], Grid, temperature=0)
+
+    rows = []
+    for r in grid.rows:
+        if len(r.box_2d) != 4:
+            continue
+        ymin, xmin, ymax, xmax = r.box_2d
+        rows.append(
+            {
+                "kind": "rule" if r.kind == "rule" else "digits",
+                "text": r.text.replace(" ", ""),
+                "circled": r.circled,
+                "color": r.color,
+                "x0": cx0 + min(xmin, xmax) / 1000 * (cx1 - cx0),
+                "x1": cx0 + max(xmin, xmax) / 1000 * (cx1 - cx0),
+                "y0": cy0 + min(ymin, ymax) / 1000 * (cy1 - cy0),
+                "y1": cy0 + max(ymin, ymax) / 1000 * (cy1 - cy0),
+            }
+        )
+    return rows, info
+
+
+class RowChar(BaseModel):
+    char: str = Field(description="글자 하나 (숫자 또는 부호)")
+    x_range: list[int] = Field(
+        description="이 글자의 [xmin, xmax]. 이미지 가로를 0~1000으로 본 좌표"
+    )
+
+
+class RowRead(BaseModel):
+    chars: list[RowChar]
+
+
+ROW_PROMPT = """
+이 이미지는 판서에서 숫자 한 줄을 크게 잘라낸 거야.
+가운데 있는 한 줄만, 왼쪽부터 글자를 하나씩 짚어 가며 chars에 옮겨 줘.
+
+1. 계산하거나 고치지 말고 쓰인 그대로.
+2. 숫자끼리 붙어 있어도 하나씩 따로 세. 예: 붙어 쓴 "10"은 1과 0 두 글자.
+3. 휘거나 기울어진 세로 획도 1이야. 동그라미 모양은 0.
+4. 괄호 ')'는 제수와 피제수 사이에 있을 때만 괄호로 적어.
+5. 위아래 줄에서 잘려 들어온 글자, 가로선, 점선, 화살표는 빼.
+"""
+
+COUNT_TOLERANCE = 0.75  # 줄 너비로 어림한 칸 수와 읽은 글자 수가 이만큼 넘게 다르면 다시 읽는다
+MAX_REREAD_ROWS = 6  # 블록 하나에서 다시 읽을 줄의 최대 개수 (분당 호출 한도 보호)
+
+
+def recheck_rows(full, scale, rows, char_w, char_h):
+    """글자 수가 줄 너비와 맞지 않는 숫자 줄을 그 줄만 크게 잘라 다시 읽는다.
+
+    붙어 쓴 1과 0, 휘어진 1처럼 블록 전체에서는 뭉개지는 글자를 줄 단위로 크게 보여 준다.
+    어림한 칸 수는 다시 읽을 줄을 고르고, 두 결과 중 어느 쪽을 쓸지 정하는 데만 쓴다
+    (글자 자체를 고치지는 않는다). 끝까지 칸 수와 안 맞으면 uncertain으로 표시한다.
+    돌려주는 값: 다시 읽는 데 걸린 초
+    """
+    h, w = full.shape[0] / scale, full.shape[1] / scale
+    seconds = 0.0
+    suspects = []
+    for r in rows:
+        if r["kind"] != "digits" or not r["text"]:
+            continue
+        r["expected"] = round((r["x1"] - r["x0"]) / char_w, 1)
+        if abs(r["expected"] - len(r["text"])) >= COUNT_TOLERANCE:
+            suspects.append(r)
+    for r in suspects[:MAX_REREAD_ROWS]:
+        cx0, cx1 = max(0, r["x0"] - char_w), min(w, r["x1"] + char_w)
+        cy0, cy1 = max(0, r["y0"] - char_h * 0.35), min(h, r["y1"] + char_h * 0.35)
+        crop = full[int(cy0 * scale) : int(cy1 * scale), int(cx0 * scale) : int(cx1 * scale)]
+        image = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        try:
+            read, info = ask_gemini([image, ROW_PROMPT], RowRead, temperature=0)
+        except GeminiError as error:
+            print(f"   줄 다시 읽기 실패: {error}", flush=True)
+            continue
+        seconds += info["seconds"]
+        chars = [c for c in read.chars if c.char.strip()]
+        text = "".join(c.char.strip() for c in chars)
+        r["first_read"] = r["text"]
+        if text and abs(len(text) - r["expected"]) <= abs(len(r["text"]) - r["expected"]):
+            r["text"] = text
+            boxes = [c.x_range for c in chars if len(c.x_range) == 2]
+            if boxes:  # 글자 단위 위치로 줄의 양 끝을 바로잡는다 (열 맞춤이 정확해짐)
+                r["x0"] = cx0 + min(min(b) for b in boxes) / 1000 * (cx1 - cx0)
+                r["x1"] = cx0 + max(max(b) for b in boxes) / 1000 * (cx1 - cx0)
+        print(f"   줄 다시 읽기: {r['first_read']} → {r['text']}", flush=True)
+    for r in rows:
+        if "expected" in r:
+            r["uncertain"] = abs(r["expected"] - len(r["text"])) >= COUNT_TOLERANCE
+    return seconds
+
+
+def find_rules(mask, box, char_w, char_h, min_chars=2):
+    """상자 안에서 가로 작대기를 픽셀로 찾는다. 글자 min_chars개보다 긴 수평선만 본다.
+
+    점선·화살표·글자의 짧은 가로획은 끊겨 있거나 짧아서 걸러진다.
+    손으로 그은 선은 살짝 기울어 여러 조각으로 잡히므로, 높이가 비슷하고
+    가로로 이어지는 조각은 하나로 합친다.
+    """
+    x0, y0, x1, y1 = (int(v) for v in box)
+    k = max(5, int(char_w * min_chars))
+    lines = cv2.morphologyEx(mask[y0:y1, x0:x1], cv2.MORPH_OPEN, np.ones((1, k), np.uint8))
+    count, _, stats, _ = cv2.connectedComponentsWithStats(lines, connectivity=8)
+    pieces = sorted(
+        [x0 + x, x0 + x + w, y0 + y, y0 + y + h]
+        for x, y, w, h, _ in stats[1:count]
+        if w >= k and w > 4 * h
+    )
+    merged = []
+    for piece in pieces:  # 왼쪽부터 보며 앞 선과 이어지면 합친다
+        for m in merged:
+            near_y = abs((m[2] + m[3]) / 2 - (piece[2] + piece[3]) / 2) < char_h * 0.6
+            if near_y and piece[0] - m[1] < char_w:
+                m[:] = [
+                    min(m[0], piece[0]),
+                    max(m[1], piece[1]),
+                    min(m[2], piece[2]),
+                    max(m[3], piece[3]),
+                ]
+                break
+        else:
+            merged.append(list(piece))
+    return [{"x0": a, "x1": b, "y0": c, "y1": d} for a, b, c, d in merged]
+
+
+def snap_rules(rules, lines, char_h):
+    """Gemini가 준 작대기마다 가까운 OpenCV 선을 찾아 양 끝을 픽셀 기준으로 맞춘다.
+
+    작대기가 있는지와 줄 순서(높이)는 Gemini를 따르고, 가로 범위만 OpenCV로 바로잡는다.
+    짝이 없는 Gemini 작대기는 그대로 둔다.
+    돌려주는 값: (바로잡은 작대기 목록, 짝을 못 찾은 OpenCV 선 목록)
+    """
+    unused = list(lines)
+    snapped = []
+    for r in rules:
+        ry = (r["y0"] + r["y1"]) / 2
+
+        near = [
+            line
+            for line in unused
+            if overlap(line, r) >= 0.5 and abs((line["y0"] + line["y1"]) / 2 - ry) < char_h
+        ]
+        if near:
+            best = min(near, key=lambda line: abs((line["y0"] + line["y1"]) / 2 - ry))
+            unused.remove(best)
+            r = {**r, "x0": best["x0"], "x1": best["x1"]}
+        snapped.append(r)
+    return snapped, unused
+
+
+def overlap(a, b):
+    """두 가로 범위가 겹치는 정도 (짧은 쪽 길이 대비)."""
+    inter = min(a["x1"], b["x1"]) - max(a["x0"], b["x0"])
+    return inter / max(1.0, min(a["x1"] - a["x0"], b["x1"] - b["x0"]))
+
+
+def missing_rules(digits, rules, lines):
+    """Gemini가 빠뜨린 작대기를 OpenCV 선으로 채운다.
+
+    작대기가 없는 이웃한 두 숫자 줄 사이 높이에 있고, 위아래 두 줄과 모두 가로로 겹치는 선만
+    작대기로 본다. 빼기 결과 위의 작대기는 위아래 숫자 줄에 걸쳐 그어지기 때문이다.
+    물결 밑줄처럼 한쪽 줄에만 걸친 선은 걸러진다.
+    """
+
+    def mid(r):
+        return (r["y0"] + r["y1"]) / 2
+
+    found = []
+    ordered = sorted(digits, key=mid)
+    for k in range(len(ordered) - 1):
+        above, below = ordered[k], ordered[k + 1]
+        if any(mid(above) < mid(r) < mid(below) for r in rules + found):
+            continue
+        between = [
+            line
+            for line in lines
+            if mid(above) < mid(line) < mid(below)
+            and overlap(line, above) >= 0.5
+            and overlap(line, below) >= 0.5
+        ]
+        if between:
+            line = max(between, key=lambda line: line["x1"] - line["x0"])
+            lines.remove(line)
+            found.append({"kind": "rule", **line})
+    return found
+
+
+def layout_grid(rows, lines):
+    """줄 목록을 열 위치가 있는 격자로 바꾼다. 숫자 한 칸의 폭을 기준으로 열을 센다.
+
+    lines: OpenCV로 찾은 가로선. 작대기의 가로 범위를 바로잡는 데 쓴다.
+    돌려주는 값: 위에서 아래 순서의 격자 줄 목록. 줄마다 col(시작 열)과
+    digits면 text·circled·color, rule이면 length(칸 수)
+    """
+    digits = [r for r in rows if r["kind"] == "digits" and r["text"]]
+    if not digits:
+        return []
+    char_w, char_h = char_size(digits)
+    rules, unused = snap_rules([r for r in rows if r["kind"] == "rule"], lines, char_h)
+    rules += missing_rules(digits, rules, unused)
+    origin = min(r["x0"] for r in digits + rules)
+
+    grid = []
+    for r in digits + rules:
+        item = {"kind": r["kind"], "col": round((r["x0"] - origin) / char_w)}
+        if r["kind"] == "digits":
+            item.update(
+                text=r["text"],
+                circled=r["circled"],
+                color=r["color"],
+                uncertain=r.get("uncertain", False),
+            )
+        else:
+            item["length"] = max(1, round((r["x1"] - r["x0"]) / char_w))
+        grid.append(((r["y0"] + r["y1"]) / 2, item))
+    return [item for _, item in sorted(grid, key=lambda g: g[0])]
+
+
+def char_size(digits):
+    """숫자 줄들로 글자 한 칸의 폭과 높이(픽셀)를 어림한다."""
+    long_rows = [r for r in digits if len(r["text"]) >= 2] or digits
+    char_w = float(np.median([(r["x1"] - r["x0"]) / len(r["text"]) for r in long_rows]))
+    char_h = float(np.median([r["y1"] - r["y0"] for r in digits]))
+    return max(char_w, 1.0), max(char_h, 1.0)
+
+
+def grid_text(grid):
+    """격자를 고정폭 글꼴용 줄 문자열로 그린다."""
+    return [
+        " " * g["col"] + (g["text"] if g["kind"] == "digits" else "─" * g["length"]) for g in grid
+    ]
+
+
+def read_aligned(full, scale, mask, card):
+    """숫자 정렬 블록 카드를 다시 읽어 격자를 붙인다. 실패하면 1차 결과를 그대로 둔다."""
+    try:
+        rows, info = read_grid(full, scale, card["box"])
+    except GeminiError as error:
+        print(f"   카드 {card['no']} 다시 읽기 실패 → 1차 결과 사용: {error}", flush=True)
+        return 0.0
+    digits = [r for r in rows if r["kind"] == "digits" and r["text"]]
+    if digits:
+        seconds = info["seconds"] + recheck_rows(full, scale, rows, *char_size(digits))
+        lines = find_rules(mask, card["box"], *char_size(digits))
+        card["grid"] = layout_grid(rows, lines)
+        card["layout"] = grid_text(card["grid"])
+        card["lines"] = [r["text"] for r in sorted(digits, key=lambda r: r["y0"])]
+        return seconds
+    return info["seconds"]
+
+
+# ─────────────────────────────────────────────
 # 5. 저장
 # ─────────────────────────────────────────────
 
@@ -434,6 +796,9 @@ h1 {{ font-size: 18px; margin: 0 0 4px; }}
        border-radius: 6px; padding: 6px; }}
 .ink img {{ max-width: 100%; display: block; }}
 .line {{ font-size: 15px; line-height: 1.7; }}
+.grid {{ margin: 0; font: 15px/1.35 ui-monospace, Menlo, monospace; overflow-x: auto; }}
+.grid .uncertain {{ text-decoration: underline dotted #b3402f; }}
+.grid .circled {{ border: 1.5px solid currentColor; border-radius: 999px; padding: 0 2px; }}
 </style></head><body>
 <h1>{title}</h1>
 <div class="meta">{meta}</div>
@@ -445,6 +810,28 @@ document.querySelectorAll(".line").forEach(el => renderMathInElement(el, {{
 </script>
 </body></html>
 """
+
+
+PEN_COLORS = {"red": "#c8372d", "blue": "#2a5db0", "green": "#2f7a4d", "yellow": "#b58900"}
+
+
+def grid_html(grid):
+    """격자를 판서 모양 그대로 보이는 html로 만든다 (펜 색과 동그라미 포함)."""
+    rows = []
+    for g in grid:
+        pad = " " * g["col"]
+        if g["kind"] == "rule":
+            rows.append(pad + "─" * g["length"])
+            continue
+        color = PEN_COLORS.get(g["color"])
+        style = f' style="color:{color}"' if color else ""
+        names = [n for n in ("circled", "uncertain") if g.get(n)]
+        cls = f' class="{" ".join(names)}"' if names else ""
+        if g.get("uncertain"):
+            cls += ' title="글자 수가 줄 너비와 맞지 않아요. 원본을 확인하세요"'
+
+        rows.append(f"{pad}<span{cls}{style}>{html.escape(g['text'])}</span>")
+    return f'<pre class="grid">{chr(10).join(rows)}</pre>'
 
 
 def card_ink(img, mask, box):
@@ -470,7 +857,10 @@ def save(out_dir, name, img, mask, cards, seconds, corners):
         cv2.putText(
             preview, str(c["no"]), (x0 + 3, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (76, 90, 47), 2
         )
-        lines = "".join(f'<div class="line">{html.escape(t)}</div>' for t in c["lines"])
+        if c.get("grid"):
+            lines = grid_html(c["grid"])
+        else:
+            lines = "".join(f'<div class="line">{html.escape(t)}</div>' for t in c["lines"])
         html_cards.append(
             f'<div class="card"><h2>{c["no"]}. {html.escape(c["title"])}</h2>'
             f'<div class="ink"><img src="card_{c["no"]:02d}_ink.png" alt=""></div>{lines}</div>'
@@ -501,9 +891,11 @@ def process(original, pen):
 
     돌려주는 값: img(잘라낸 사진), corners(화면 모서리, 못 찾으면 None), mask(필기 마스크),
     cards(덩어리 카드 목록), seconds(Gemini 응답 시간), retries(Gemini 다시 시도 횟수),
-    waited(한도·다시 시도로 기다린 초)
+    waited(한도·다시 시도로 기다린 초), grid_seconds(숫자 정렬 블록 다시 읽기에 걸린 초)
     """
-    img, corners = crop_slide(original, pen)
+    full, corners = straighten(original, pen)
+    img = shrink(full, 1600)
+    scale = full.shape[1] / img.shape[1]
     print(
         f"1. 화면 {'찾아서 잘라냄' if corners is not None else '자르지 않음'} "
         f"→ {img.shape[1]}x{img.shape[0]}",
@@ -529,13 +921,21 @@ def process(original, pen):
             {
                 "no": len(cards) + 1,
                 "title": region.title,
+                "kind": "aligned" if region.kind == "aligned" else "text",
                 "lines": region.lines,
                 "box_gemini": list(rough),
                 "box": list(refine_box(clean, rough)),
             }
         )
     print(f"4. 상자 다듬기 {len(cards)}개", flush=True)
-    return {"img": img, "corners": corners, "mask": mask, "cards": cards, **info}
+
+    aligned = [c for c in cards if c["kind"] == "aligned"]
+    grid_seconds = sum(read_aligned(full, scale, mask, c) for c in aligned)
+    if aligned:
+        print(f"4-1. 숫자 정렬 블록 {len(aligned)}개 다시 읽기 {grid_seconds:.1f}초", flush=True)
+    result = {"img": img, "corners": corners, "mask": mask, "cards": cards, **info}
+    result["grid_seconds"] = grid_seconds
+    return result
 
 
 def run(photo_path, pen, out_root):
