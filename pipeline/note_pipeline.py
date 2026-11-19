@@ -40,7 +40,8 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+# 기본은 빠르고 한도가 넉넉한 flash-lite. 정확도가 더 필요하면 .env에 GEMINI_MODEL=gemini-3.5-flash
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 
 # ─────────────────────────────────────────────
@@ -224,12 +225,19 @@ PROMPT = """
 
 
 def load_api_key():
-    """저장소 최상위 .env 파일에서 GEMINI_API_KEY를 읽는다."""
+    """저장소 최상위 .env 파일에서 GEMINI_API_KEY와 GEMINI_MODEL을 읽는다.
+
+    이미 환경 변수로 준 값이 있으면 그 값을 쓴다 (.env보다 우선).
+    """
+    global MODEL
     env_file = ROOT / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
-            if line.startswith("GEMINI_API_KEY="):
-                os.environ["GEMINI_API_KEY"] = line.split("=", 1)[1].strip().strip('"')
+            name, _, value = line.partition("=")
+            name, value = name.strip(), value.strip().strip('"')
+            if name in ("GEMINI_API_KEY", "GEMINI_MODEL") and value:
+                os.environ.setdefault(name, value)
+    MODEL = os.environ.get("GEMINI_MODEL", MODEL)
     if not os.environ.get("GEMINI_API_KEY"):
         sys.exit(f"API 키가 없어요. {env_file} 에 GEMINI_API_KEY=발급받은키 한 줄을 넣어 주세요.")
 
