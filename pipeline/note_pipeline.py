@@ -603,12 +603,17 @@ def recheck_rows(full, scale, rows, char_w, char_h):
             read, info = ask_gemini([image, ROW_PROMPT], RowRead, temperature=0)
         except GeminiError as error:
             print(f"   줄 다시 읽기 실패: {error}", flush=True)
+            r["reread_failed"] = True
             continue
         seconds += info["seconds"]
         chars = [c for c in read.chars if c.char.strip()]
         text = "".join(c.char.strip() for c in chars)
         r["first_read"] = r["text"]
-        if text and abs(len(text) - r["expected"]) <= abs(len(r["text"]) - r["expected"]):
+        # 원래 줄에 없던 기호(|, ) 등)가 새로 생기면 잘못 읽은 것으로 보고 쓰지 않는다
+        new_marks = {ch for ch in text if not ch.isdigit()} - set(r["text"])
+        if new_marks:
+            r["reread_rejected"] = text
+        elif text and abs(len(text) - r["expected"]) <= abs(len(r["text"]) - r["expected"]):
             r["text"] = text
             boxes = [c.x_range for c in chars if len(c.x_range) == 2]
             if boxes:  # 글자 단위 위치로 줄의 양 끝을 바로잡는다 (열 맞춤이 정확해짐)
@@ -740,6 +745,7 @@ def layout_grid(rows, lines):
                 circled=r["circled"],
                 color=r["color"],
                 uncertain=r.get("uncertain", False),
+                review=r.get("review", []),
             )
         else:
             item["length"] = max(1, round((r["x1"] - r["x0"]) / char_w))
@@ -762,16 +768,51 @@ def grid_text(grid):
     ]
 
 
+def row_reasons(r):
+    """숫자 줄 하나가 '확인 필요'인 이유 목록. 문제가 없으면 빈 목록."""
+    reasons = []
+    if r.get("reread_failed"):
+        reasons.append("다시 읽기 실패")
+    if r.get("uncertain"):
+        reasons.append(
+            f"자릿수 불일치 (줄 너비 약 {r['expected']:g}칸, 읽은 글자 {len(r['text'])}개)"
+        )
+    if r.get("first_read") and r["first_read"] != r["text"]:
+        reasons.append(f"다시 읽어서 바뀜 ({r['first_read']} → {r['text']})")
+    if r.get("reread_rejected"):
+        reasons.append(f"다시 읽은 결과가 달라 확인 필요 ({r['text']} / {r['reread_rejected']})")
+    return reasons
+
+
+def add_review(card, box, reasons):
+    """카드에 '확인 필요' 항목을 더한다. box는 작업용 사진 기준 픽셀 (x0, y0, x1, y1)."""
+    x0, y0, x1, y1 = card["box"]
+    clipped = [
+        int(min(max(box[0], x0), x1)),
+        int(min(max(box[1], y0), y1)),
+        int(min(max(box[2], x0), x1)),
+        int(min(max(box[3], y0), y1)),
+    ]
+    card.setdefault("review", []).append({"box": clipped, "reasons": reasons})
+
+
 def read_aligned(full, scale, mask, card):
     """숫자 정렬 블록 카드를 다시 읽어 격자를 붙인다. 실패하면 1차 결과를 그대로 둔다."""
     try:
         rows, info = read_grid(full, scale, card["box"])
     except GeminiError as error:
         print(f"   카드 {card['no']} 다시 읽기 실패 → 1차 결과 사용: {error}", flush=True)
+        add_review(card, card["box"], ["숫자 정렬 블록 다시 읽기 실패 (1차 결과 사용)"])
         return 0.0
     digits = [r for r in rows if r["kind"] == "digits" and r["text"]]
     if digits:
         seconds = info["seconds"] + recheck_rows(full, scale, rows, *char_size(digits))
+        for r in sorted(digits, key=lambda r: r["y0"]):
+            r["review"] = row_reasons(r)
+            if r["review"]:  # 줄 위치가 조금 어긋나도 글자가 칸 안에 들어오도록 여유를 둔다
+                px, py = (r["y1"] - r["y0"]) * 0.3, (r["y1"] - r["y0"]) * 0.35
+                box = (r["x0"] - px, r["y0"] - py, r["x1"] + px, r["y1"] + py)
+                add_review(card, box, r["review"])
         lines = find_rules(mask, card["box"], *char_size(digits))
         card["grid"] = layout_grid(rows, lines)
         card["layout"] = grid_text(card["grid"])
@@ -803,9 +844,19 @@ h1 {{ font-size: 18px; margin: 0 0 4px; }}
 .ink {{ background: repeating-conic-gradient(#f1f3f1 0 25%, #fff 0 50%) 0 0 / 14px 14px;
        border-radius: 6px; padding: 6px; }}
 .ink img {{ max-width: 100%; display: block; }}
+.stage {{ position: relative; display: inline-block; max-width: 100%; vertical-align: top; }}
+.flag {{ position: absolute; box-sizing: border-box; border: 2px dashed #e07b00;
+        border-radius: 4px; background: rgba(224, 123, 0, 0.08); }}
+.flag::after {{ content: attr(data-n); position: absolute; top: -9px; right: -9px; width: 16px;
+               height: 16px; border-radius: 50%; background: #e07b00; color: #fff;
+               font: 700 11px/16px -apple-system, sans-serif; text-align: center; }}
+.badge {{ margin-left: 6px; padding: 2px 8px; border-radius: 999px; background: #fff1df;
+         color: #9a5300; font-size: 12px; font-weight: 600; white-space: nowrap; }}
+.reasons {{ margin: 0; padding: 8px 10px 8px 26px; border-radius: 6px; background: #fff7ec;
+           color: #6b4a1f; font-size: 13px; line-height: 1.6; }}
 .line {{ font-size: 15px; line-height: 1.7; }}
 .grid {{ margin: 0; font: 15px/1.35 ui-monospace, Menlo, monospace; overflow-x: auto; }}
-.grid .uncertain {{ text-decoration: underline dotted #b3402f; }}
+.grid .review {{ text-decoration: underline wavy #e07b00; text-underline-offset: 3px; }}
 .grid .circled {{ border: 1.5px solid currentColor; border-radius: 999px; padding: 0 2px; }}
 </style></head><body>
 <h1>{title}</h1>
@@ -833,13 +884,35 @@ def grid_html(grid):
             continue
         color = PEN_COLORS.get(g["color"])
         style = f' style="color:{color}"' if color else ""
-        names = [n for n in ("circled", "uncertain") if g.get(n)]
+        names = [n for n in ("circled", "review") if g.get(n)]
         cls = f' class="{" ".join(names)}"' if names else ""
-        if g.get("uncertain"):
-            cls += ' title="글자 수가 줄 너비와 맞지 않아요. 원본을 확인하세요"'
+        if g.get("review"):
+            cls += f' title="확인 필요: {html.escape(" / ".join(g["review"]))}"'
 
         rows.append(f"{pad}<span{cls}{style}>{html.escape(g['text'])}</span>")
     return f'<pre class="grid">{chr(10).join(rows)}</pre>'
+
+
+def review_html(card):
+    """'확인 필요' 항목을 스티커 위에 겹칠 칸들과, 카드 아래 이유 목록 html로 만든다.
+
+    스티커 이미지 파일은 그대로 두고 화면에서만 겹쳐 그린다 (위치는 카드 크기 대비 %).
+    """
+    x0, y0, x1, y1 = card["box"]
+    w, h = max(1, x1 - x0), max(1, y1 - y0)
+    flags, items = [], []
+    for n, item in enumerate(card.get("review", []), 1):
+        bx0, by0, bx1, by1 = item["box"]
+        reasons = " / ".join(item["reasons"])
+        style = (
+            f"left:{(bx0 - x0) / w * 100:.2f}%;top:{(by0 - y0) / h * 100:.2f}%;"
+            f"width:{(bx1 - bx0) / w * 100:.2f}%;height:{(by1 - by0) / h * 100:.2f}%"
+        )
+        title = html.escape(f"{n}. {reasons}")
+        flags.append(f'<div class="flag" data-n="{n}" style="{style}" title="{title}"></div>')
+        items.append(f"<li>{html.escape(reasons)}</li>")
+    reasons_list = f'<ol class="reasons">{"".join(items)}</ol>' if items else ""
+    return "".join(flags), reasons_list
 
 
 def card_ink(img, mask, box):
@@ -869,9 +942,13 @@ def save(out_dir, name, img, mask, cards, seconds, corners):
             lines = grid_html(c["grid"])
         else:
             lines = "".join(f'<div class="line">{html.escape(t)}</div>' for t in c["lines"])
+        flags, reasons_list = review_html(c)
+        count = len(c.get("review", []))
+        badge = f'<span class="badge">확인 필요 {count}곳</span>' if count else ""
         html_cards.append(
-            f'<div class="card"><h2>{c["no"]}. {html.escape(c["title"])}</h2>'
-            f'<div class="ink"><img src="card_{c["no"]:02d}_ink.png" alt=""></div>{lines}</div>'
+            f'<div class="card"><h2>{c["no"]}. {html.escape(c["title"])}{badge}</h2>'
+            f'<div class="ink"><div class="stage"><img src="card_{c["no"]:02d}_ink.png" alt="">'
+            f"{flags}</div></div>{lines}{reasons_list}</div>"
         )
 
     cv2.imwrite(str(out_dir / "boxes.jpg"), preview)
@@ -936,6 +1013,10 @@ def process(original, pen):
             }
         )
     print(f"4. 상자 다듬기 {len(cards)}개", flush=True)
+
+    for c in cards:
+        if any("[?]" in line for line in c["lines"]):
+            add_review(c, c["box"], ["판독 불가 [?] 포함"])
 
     aligned = [c for c in cards if c["kind"] == "aligned"]
     grid_seconds = sum(read_aligned(full, scale, mask, c) for c in aligned)
